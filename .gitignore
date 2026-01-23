@@ -1,5 +1,77 @@
-__pycache__/
+# ---------------------------------
+# Environment files
+# ---------------------------------
+
 .env
-venv/
+.env.*
+backend/.env
+backend/app/.env
+
+
+# ---------------------------------
+# Python cache & build
+# ---------------------------------
+
+__pycache__/
 *.pyc
-*.sqlite3
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+
+# ---------------------------------
+# Conda / virtual environments
+# ---------------------------------
+
+.env/
+.venv/
+conda-env/
+miniconda/
+anaconda/
+
+
+# ---------------------------------
+# Data & runtime-generated files
+# ---------------------------------
+
+data/
+backend/data/
+
+logs/
+*.log
+
+
+# ---------------------------------
+# Model files (large LLM weights)
+# ---------------------------------
+
+models/*.gguf
+backend/models/*.gguf
+
+
+# ---------------------------------
+# ChromaDB / Vector store
+# ---------------------------------
+
+chroma_db/
+backend/data/chroma_db/
+
+
+# ---------------------------------
+# OS & Editor files
+# ---------------------------------
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+
+# ---------------------------------
+# Electron build artifacts
+# ---------------------------------
+
+frontend/electron/dist/
+frontend/electron/node_modules/
