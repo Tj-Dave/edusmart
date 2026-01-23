@@ -1,5 +1,6 @@
-from backend.app.routes import ai_query, ingestion
+from app.routes import ai_query, ingestion
 from fastapi import FastAPI
+from app.core.config import settings
 
 app = FastAPI()
 

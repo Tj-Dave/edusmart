@@ -1,0 +1,1 @@
+# EduSmart backend application package
