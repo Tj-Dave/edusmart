@@ -3,7 +3,9 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 from typing import List
 import os
+from pathlib import Path
 
+BASE_DIR = Path(__file__).resolve().parents[3]  
 
 class Settings(BaseSettings):
     # =====================================================
@@ -32,13 +34,14 @@ class Settings(BaseSettings):
 
     LLM_BACKEND: str = "llama.cpp"         # llama.cpp
 
-    LLM_MODE: str = "cpu"                  # cpu | desktop | gpu
+    LLM_MODE: str = "desktop"                  # cpu | desktop | gpu
 
-    LLM_MODEL_CPU_PATH: str = "./models/gemma-3b.gguf"
-    LLM_MODEL_DESKTOP_PATH: str = "./models/gemma-3n.gguf"
-    LLM_MODEL_GPU_PATH: str = "./models/gemma-4b.gguf"
+    LLM_MODEL_CPU_PATH: Path = BASE_DIR / "models" / "gemma-3-12b-pt-q4_0.gguf"
+    LLM_MODEL_DESKTOP_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
+    LLM_MODEL_GPU_PATH: Path = BASE_DIR / "models" / "gemma-4b.gguf"
 
     LLM_CONTEXT_SIZE: int = 4096
+    LLM_THREADS: int = 8
     LLM_MAX_TOKENS: int = 512
     LLM_TEMPERATURE: float = 0.7
     LLM_TOP_P: float = 0.9
