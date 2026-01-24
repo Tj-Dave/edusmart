@@ -12,6 +12,13 @@ The architecture is designed to support:
 - Dynamic knowledge updates through lecturer content ingestion  
 
 ---
+### Environment Setup
+
+Copy the example environment file:
+
+```bash
+cp .env.example .env
+```
 
 ## 1. High-Level Architecture Overview
 
@@ -428,7 +435,135 @@ This system follows:
 
 ---
 
-## 15. Summary
+## 15. Branching Strategy & Development Workflow
+
+EduSmart follows a **structured Git branching strategy** designed to support collaborative development, feature isolation, integration testing, and stable releases.
+
+The repository maintains **three primary branch types**:
+
+---
+
+### 15.1 Main Branch (`main`)
+
+The `main` branch represents the **stable production-ready state** of the system.
+
+**Characteristics:**
+- Contains only **tested and stable code**
+- Reflects **official project milestones and releases**
+- Used for:
+  - final project submissions  
+  - demonstrations  
+  - deployment-ready builds  
+
+**Rules:**
+- No direct development on `main`
+- Only merged from `dev` after validation
+- Each merge represents a stable system version
+
+---
+
+### 15.2 Development Branch (`dev`)
+
+The `dev` branch serves as the **primary integration branch**.
+
+**Purpose:**
+- Aggregate completed features
+- Perform integration testing
+- Validate interoperability between system components
+
+**Characteristics:**
+- Contains all **actively developed and tested functionality**
+- May be temporarily unstable, but must always remain **buildable**
+- Acts as the staging area before promotion to `main`
+
+**Rules:**
+- ✔ All feature branches merge into `dev`
+- ✔ Integration and system-level testing occurs here
+- ✔ Only approved and tested changes are promoted to `main`
+
+---
+
+### 15.3 Feature Branches (`feature/*`)
+
+Each new feature is developed in an **isolated feature branch**, created from the `dev` branch.
+
+**Naming convention:**
+feature/feature-name
+
+**Examples:**
+- feature/bloom-detector
+- feature/rag-engine
+- feature/lecturer-ingestion
+- feature/llama-integration
+
+
+**Workflow:**
+1. Create feature branch from `dev`
+2. Develop and test the feature in isolation
+3. Commit incremental changes
+4. Merge feature branch back into `dev`
+5. Resolve conflicts and validate integration
+6. Delete feature branch after successful merge
+
+**Rules:**
+- Feature branches are never merged directly into `main`
+- Each feature branch targets **one logical feature**
+- Branches are short-lived to avoid divergence
+
+---
+
+### 15.4 Development Workflow Summary
+
+The overall workflow follows this pattern:
+
+```
+main
+↑
+│ (stable releases only)
+│
+dev
+↑
+│ (integration & testing)
+│
+feature/*
+(isolated feature development)
+```
+
+**Step-by-step lifecycle:**
+1. **Feature initiation**  
+   → branch created from `dev`
+
+2. **Feature development**  
+   → coding, testing, and refinement in feature branch
+
+3. **Integration**  
+   → feature merged into `dev`
+
+4. **System validation**  
+   → integration testing on `dev`
+
+5. **Release promotion**  
+   → stable `dev` state merged into `main`
+
+---
+
+### 15.5 Rationale for This Strategy
+
+This branching model was selected to:
+
+- Minimize integration conflicts
+- Isolate experimental features
+- Protect the stability of the main branch
+- Support parallel development by multiple contributors
+- Align with industry-standard Git workflows
+
+It ensures that:
+- **Research artifacts remain reproducible**
+- **Development risks are controlled**
+- **System stability is preserved throughout the project lifecycle**
+
+
+## 16. Summary
 
 EduSmart is designed as a:
 
