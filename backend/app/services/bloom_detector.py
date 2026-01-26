@@ -1,41 +1,82 @@
-import re
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 class BloomDetector:
     """
     Detects Bloom's cognitive level from a user query
-    using keyword and pattern matching.
+    using SBERT sentence similarity.
     """
 
-    # Bloom keyword patterns
-    BLOOM_PATTERNS = {
+    # Example sentences for each Bloom level
+    BLOOM_EXAMPLES = {
         "Remember": [
-            r"\bdefine\b", r"\blist\b", r"\bname\b", r"\bstate\b", r"\bidentify\b"
+            "Define the concept",
+            "List the main points",
+            "What is the definition of",
+            "Name the components",
+            "Identify the key terms"
         ],
         "Understand": [
-            r"\bexplain\b", r"\bdescribe\b", r"\bsummarize\b", r"\binterpret\b"
+            "Explain how this works",
+            "Describe the process",
+            "What does this mean",
+            "Summarize the main idea",
+            "Interpret the results"
         ],
         "Apply": [
-            r"\bapply\b", r"\buse\b", r"\bdemonstrate\b", r"\bsolve\b", r"\bcalculate\b"
+            "How do I solve this problem",
+            "Apply this method to",
+            "Use this formula to calculate",
+            "Demonstrate the technique",
+            "Show me how to implement"
         ],
         "Analyze": [
-            r"\banalyze\b", r"\bcompare\b", r"\bdifferentiate\b", r"\bexamine\b"
+            "Compare these approaches",
+            "What are the differences between",
+            "Analyze the relationship",
+            "Examine the causes",
+            "Break down the components"
         ],
         "Evaluate": [
-            r"\bevaluate\b", r"\bjustify\b", r"\bcritique\b", r"\bassess\b"
+            "Which approach is better",
+            "Assess the effectiveness",
+            "Critique this method",
+            "Justify your choice",
+            "Evaluate the pros and cons"
         ],
         "Create": [
-            r"\bdesign\b", r"\bcreate\b", r"\bdevelop\b", r"\bconstruct\b", r"\bformulate\b"
+            "Design a solution for",
+            "Create a new approach",
+            "Develop a plan to",
+            "Construct a framework",
+            "Formulate a strategy"
         ]
     }
 
-    @classmethod
-    def detect(cls, query: str) -> str:
-        query = query.lower()
+    def __init__(self):
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        self._encode_examples()
 
-        for level, patterns in cls.BLOOM_PATTERNS.items():
-            for pattern in patterns:
-                if re.search(pattern, query):
-                    return level
+    def _encode_examples(self):
+        """Pre-encode all example sentences for efficiency"""
+        self.encoded_examples = {}
+        for level, examples in self.BLOOM_EXAMPLES.items():
+            self.encoded_examples[level] = self.model.encode(examples)
 
-        # Default if no keyword detected
-        return "Remember"
+    def detect(self, query: str) -> str:
+        """Detect Bloom level using sentence similarity"""
+        query_embedding = self.model.encode([query])
+        
+        max_similarity = -1
+        best_level = "Unknown"
+        
+        for level, examples_embeddings in self.encoded_examples.items():
+            similarities = cosine_similarity(query_embedding, examples_embeddings)
+            avg_similarity = np.mean(similarities)
+            
+            if avg_similarity > max_similarity:
+                max_similarity = avg_similarity
+                best_level = level
+        
+        return best_level
