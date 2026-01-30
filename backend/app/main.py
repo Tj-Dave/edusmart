@@ -12,7 +12,6 @@ app.include_router(ai_query_router)
 def health():
     return {"status": "ok"}
 
-
 @app.get("/test-llm")
 async def test_llm():
     llm = LLMClient()
