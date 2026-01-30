@@ -4,8 +4,7 @@ from pydantic_settings import BaseSettings
 from typing import List
 import os
 from pathlib import Path
-
-BASE_DIR = Path(__file__).resolve().parents[3]  
+from typing import ClassVar
 
 class Settings(BaseSettings):
     # =====================================================
@@ -19,6 +18,7 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
 
+    BASE_DIR: ClassVar[Path] = Path(__file__).resolve().parents[3]  
 
     # =====================================================
     # FastAPI / Server Settings
@@ -34,9 +34,9 @@ class Settings(BaseSettings):
 
     LLM_BACKEND: str = "llama.cpp"         # llama.cpp
 
-    LLM_MODE: str = "desktop"                  # cpu | desktop | gpu
+    LLM_MODE: str = "cpu"                  # cpu | desktop | gpu
 
-    LLM_MODEL_CPU_PATH: Path = BASE_DIR / "models" / "gemma-3-12b-pt-q4_0.gguf"
+    LLM_MODEL_CPU_PATH: Path = BASE_DIR / "models" / "gemma-3-4b-pt-q4_0.gguf"
     LLM_MODEL_DESKTOP_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
     LLM_MODEL_GPU_PATH: Path = BASE_DIR / "models" / "gemma-4b.gguf"
 

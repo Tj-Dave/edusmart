@@ -1,11 +1,5 @@
-from .vector_store import (
-    add_documents,
-    query_documents,
-    initialize_vector_store,
-)
+from .vector_store import VectorStore
 
 __all__ = [
-    "add_documents",
-    "query_documents",
-    "initialize_vector_store",
+    "VectorStore",
 ]
