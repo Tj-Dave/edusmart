@@ -1,10 +1,8 @@
 from functools import lru_cache
-from pydantic import Field
 from pydantic_settings import BaseSettings
-from typing import List
-import os
+from typing import List, ClassVar
 from pathlib import Path
-from typing import ClassVar
+
 
 class Settings(BaseSettings):
     # =====================================================
@@ -18,7 +16,7 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
 
-    BASE_DIR: ClassVar[Path] = Path(__file__).resolve().parents[3]  
+    BASE_DIR: ClassVar[Path] = Path(__file__).resolve().parents[3]
 
     # =====================================================
     # FastAPI / Server Settings
@@ -27,33 +25,54 @@ class Settings(BaseSettings):
     FASTAPI_WORKERS: int = 1
     FASTAPI_RELOAD: bool = True
 
-
     # =====================================================
-    # LLM Configuration (llama.cpp + Gemma)
+    # llama.cpp (shared)
     # =====================================================
 
     LLM_BACKEND: str = "llama.cpp"         # llama.cpp
-
     LLM_MODE: str = "cpu"                  # cpu | desktop | gpu
+    LLAMA_CPP_BINARY: Path = BASE_DIR / "bin" / "llama-cli"
 
-    LLM_MODEL_CPU_PATH: Path = BASE_DIR / "models" / "gemma-3-4b-pt-q4_0.gguf"
-    LLM_MODEL_DESKTOP_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
-    LLM_MODEL_GPU_PATH: Path = BASE_DIR / "models" / "gemma-4b.gguf"
+    # =====================================================
+    # QUERY LLM (fast) - Phi-3 Mini for multi-query expansion
+    # =====================================================
 
-    LLM_CONTEXT_SIZE: int = 4096
-    LLM_THREADS: int = 8
-    LLM_MAX_TOKENS: int = 512
-    LLM_TEMPERATURE: float = 0.7
-    LLM_TOP_P: float = 0.9
+    QUERY_LLM_ENABLED: bool = True
+    QUERY_LLM_MODEL_FAMILY: str = "phi-3-mini"
 
+    QUERY_LLM_MODEL_CPU_PATH: Path = BASE_DIR / "models" / "Phi-3-mini-4k-instruct-q4.gguf"
+    QUERY_LLM_MODEL_DESKTOP_PATH: Path = BASE_DIR / "models" / "Phi-3-mini-4k-instruct-q4.gguf"
+    QUERY_LLM_MODEL_GPU_PATH: Path = BASE_DIR / "models" / "Phi-3-mini-4k-instruct-q4.gguf"
+
+    QUERY_LLM_CONTEXT_SIZE: int = 2048
+    QUERY_LLM_THREADS: int = 8
+    QUERY_LLM_MAX_TOKENS: int = 128
+    QUERY_LLM_TEMPERATURE: float = 0.3
+    QUERY_LLM_TOP_P: float = 0.9
+
+    # =====================================================
+    # FINAL LLM (strong) - Gemma for final inference/answering
+    # =====================================================
+
+    FINAL_LLM_ENABLED: bool = True
+    FINAL_LLM_MODEL_FAMILY: str = "gemma"
+
+    FINAL_LLM_MODEL_CPU_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
+    FINAL_LLM_MODEL_DESKTOP_PATH: Path = BASE_DIR / "models" / "gemma-3-4b-pt-q4_0.gguf"
+    FINAL_LLM_MODEL_GPU_PATH: Path = BASE_DIR / "models" / "gemma-4b.gguf"
+
+    FINAL_LLM_CONTEXT_SIZE: int = 4096
+    FINAL_LLM_THREADS: int = 8
+    FINAL_LLM_MAX_TOKENS: int = 512
+    FINAL_LLM_TEMPERATURE: float = 0.7
+    FINAL_LLM_TOP_P: float = 0.9
 
     # =====================================================
     # Embedding Model Configuration
     # =====================================================
 
-    EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
+    EMBEDDING_MODEL_NAME: str = "intfloat/e5-base-v2"
     EMBEDDING_DEVICE: str = "cpu"          # cpu | cuda (future)
-
 
     # =====================================================
     # Vector Database (ChromaDB)
@@ -62,7 +81,6 @@ class Settings(BaseSettings):
     VECTOR_DB_TYPE: str = "chroma"
     VECTOR_DB_PATH: str = "./data/chroma_db"
     VECTOR_DB_COLLECTION: str = "edusmart_knowledge_base"
-
 
     # =====================================================
     # Data Directories
@@ -75,7 +93,6 @@ class Settings(BaseSettings):
     RAW_IMAGES_DIR: str = "./data/raw_images"
     EMBEDDINGS_DIR: str = "./data/embeddings"
 
-
     # =====================================================
     # File Upload & Ingestion Settings
     # =====================================================
@@ -86,7 +103,6 @@ class Settings(BaseSettings):
     TEXT_CHUNK_SIZE: int = 500
     TEXT_CHUNK_OVERLAP: int = 100
 
-
     # =====================================================
     # OCR Configuration (Future)
     # =====================================================
@@ -95,14 +111,12 @@ class Settings(BaseSettings):
     OCR_ENGINE: str = "tesseract"
     OCR_LANGUAGE: str = "eng"
 
-
     # =====================================================
     # Security & Authentication (Future)
     # =====================================================
 
     SECRET_KEY: str = "change_this_in_production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-
 
     # =====================================================
     # Logging Configuration
@@ -112,7 +126,6 @@ class Settings(BaseSettings):
     LOG_TO_FILE: bool = False
     LOG_FILE_PATH: str = "./logs/app.log"
 
-
     # =====================================================
     # Development / Testing Flags
     # =====================================================
@@ -121,32 +134,38 @@ class Settings(BaseSettings):
     ENABLE_RAG: bool = True
     ENABLE_INGESTION: bool = True
 
-
     # =====================================================
     # Helper Properties
     # =====================================================
 
-    @property
-    def llm_model_path(self) -> str:
-        """
-        Return the correct LLM model path based on LLM_MODE.
-        """
+    def _pick_path_by_mode(self, cpu_path: Path, desktop_path: Path, gpu_path: Path) -> Path:
         if self.LLM_MODE == "cpu":
-            return self.LLM_MODEL_CPU_PATH
-        elif self.LLM_MODE == "desktop":
-            return self.LLM_MODEL_DESKTOP_PATH
-        elif self.LLM_MODE == "gpu":
-            return self.LLM_MODEL_GPU_PATH
-        else:
-            raise ValueError(f"Invalid LLM_MODE: {self.LLM_MODE}")
+            return cpu_path
+        if self.LLM_MODE == "desktop":
+            return desktop_path
+        if self.LLM_MODE == "gpu":
+            return gpu_path
+        raise ValueError(f"Invalid LLM_MODE: {self.LLM_MODE}")
+
+    @property
+    def query_llm_model_path(self) -> Path:
+        return self._pick_path_by_mode(
+            self.QUERY_LLM_MODEL_CPU_PATH,
+            self.QUERY_LLM_MODEL_DESKTOP_PATH,
+            self.QUERY_LLM_MODEL_GPU_PATH,
+        )
+
+    @property
+    def final_llm_model_path(self) -> Path:
+        return self._pick_path_by_mode(
+            self.FINAL_LLM_MODEL_CPU_PATH,
+            self.FINAL_LLM_MODEL_DESKTOP_PATH,
+            self.FINAL_LLM_MODEL_GPU_PATH,
+        )
 
     @property
     def allowed_file_types_list(self) -> List[str]:
-        """
-        Return allowed file types as a list.
-        """
         return [ft.strip().lower() for ft in self.ALLOWED_FILE_TYPES.split(",")]
-
 
     class Config:
         env_file = ".env"
@@ -163,5 +182,4 @@ def get_settings() -> Settings:
     return Settings()
 
 
-# This is what the rest of the app will import
 settings = get_settings()

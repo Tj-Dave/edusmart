@@ -9,7 +9,7 @@ class RAGEngine:
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
         self.vector_store = VectorStore()
     
-    def retrieve(self, query: str, competency: List[Dict], n_results: int = 5) -> List[str]:
+    def retrieve(self, query: str, n_results: int = 5) -> List[str]:
         """Retrieve relevant document chunks for the query"""
         # Embed the user query
         query_embedding = self.model.encode([query])[0].tolist()

@@ -36,15 +36,15 @@ class LLMClient:
 
         self.mock_mode = False
 
-        model_path = str(settings.llm_model_path)
+        model_path = str(settings.FINAL_LLM_MODEL_CPU_PATH)
 
         print(f"[LLM] Loading model from: {model_path}")
-        print(f"[LLM] Context size: {settings.LLM_CONTEXT_SIZE}")
+        print(f"[LLM] Context size: {settings.FINAL_LLM_CONTEXT_SIZE}")
 
         self.llm = Llama(
             model_path=model_path,
-            n_ctx=settings.LLM_CONTEXT_SIZE,
-            n_threads=settings.LLM_THREADS,              # Adjust based on CPU cores
+            n_ctx=settings.FINAL_LLM_CONTEXT_SIZE,
+            n_threads=settings.FINAL_LLM_THREADS,              # Adjust based on CPU cores
             n_batch=512,
             verbose=False
         )
@@ -64,9 +64,9 @@ class LLMClient:
 
         response = self.llm(
             prompt,
-            max_tokens=settings.LLM_MAX_TOKENS,
-            temperature=settings.LLM_TEMPERATURE,
-            top_p=settings.LLM_TOP_P,
+            max_tokens=settings.FINAL_LLM_MAX_TOKENS,
+            temperature=settings.FINAL_LLM_TEMPERATURE,
+            top_p=settings.FINAL_LLM_TOP_P,
             stop=["</s>"]
         )
 
