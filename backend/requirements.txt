@@ -99,6 +99,10 @@ python-dateutil @ file:///croot/python-dateutil_1716495738603/work
 python-dotenv==1.2.1
 pytz @ file:///croot/pytz_1752135852232/work
 PyYAML==6.0.3
+# Document parsing libraries for ingestion
+PyMuPDF==1.25.2
+python-docx==1.1.2
+python-pptx==1.0.2
 referencing==0.37.0
 regex==2026.1.15
 requests==2.32.5
@@ -126,6 +130,10 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata @ file:///home/task_176829656558347/croot/python-tzdata_1768296637279/work
 urllib3==2.6.3
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+httpx==0.28.1
 uuid_utils==0.14.0
 uvicorn==0.40.0
 uvloop==0.22.1
