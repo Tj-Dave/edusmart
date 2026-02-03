@@ -4,42 +4,53 @@ class PromptEngine:
     """Builds structured prompts for LLM based on pedagogical context"""
     
     @staticmethod
-    def build_prompt(query: str, bloom_level: str, competency: List[Dict], context: List[str]) -> str:
-        """Build final prompt incorporating all pipeline components"""
+    def build_prompt(query: str, bloom_level: str, competency: List[Dict], context: List[str], memory: str) -> str:
+        """Build optimized prompt aligned with CBC values and pedagogical best practices"""
         
-        # Extract competency values and format them (only confidence > 0.8)
-        if competency:
-            high_confidence_competencies = [c for c in competency if c.get('confidence', 0) > 0.8]
-            if high_confidence_competencies:
-                competency_list = [f"{c['value']} (confidence: {c['confidence']})" for c in high_confidence_competencies]
-                competency_text = "\n- ".join(competency_list)
-                competency_text = "- " + competency_text
-            else:
-                competency_text = "- General Learning Support"
-        else:
-            competency_text = "- General Learning Support"
+        # Format competencies concisely
+        comp_text = PromptEngine._format_competencies(competency)
         
-        # Format context
-        context_text = "\n".join(context) if context and context != ["no context"] else "No specific context available."
+        # Format context efficiently
+        ctx_text = "\n".join(context[:3]) if context and context != ["no context"] else "No context available"
         
-        # Build structured prompt
-        prompt = f"""You are an AI learning assistant aligned with Uganda's Competency-Based Curriculum (CBC).
+        # Format memory if present
+        mem_text = f"\nPrevious context: {memory[:150]}..." if memory and memory.strip() else ""
+        
+        # Build CBC-aligned prompt
+        return f"""You are EduSmart, an AI Education assistant, aligned with Uganda's Competency-Based Curriculum (CBC) to assist develop critical thinkers, creative problem-solvers, and responsible citizens.
 
-COGNITIVE LEVEL: {bloom_level}
-RELEVANT COMPETENCIES:
-{competency_text}
+TASK: {PromptEngine._get_bloom_instruction(bloom_level)}
+COMPETENCIES: {comp_text}
+CONTEXT: {ctx_text}{mem_text}
 
-CONTEXT:
-{context_text}
+QUERY: {query}
 
-STUDENT QUERY: {query}
-
-Provide a clear, pedagogically appropriate response that:
-1. Addresses the {bloom_level} cognitive level
-2. Supports development of the identified competencies
-3. Uses the provided context when relevant
-4. Is educational and curriculum-aligned
+Provide a clear, pedagogically sound response that:
+• Matches the {bloom_level} cognitive level
+• Develops CBC competencies through practical examples
+• Connects learning to real-world applications
+• Encourages critical thinking and problem-solving
 
 Response:"""
+    
+    @staticmethod
+    def _format_competencies(competency: List[Dict]) -> str:
+        """Extract high-confidence competencies"""
+        if not competency:
+            return "General CBC learning support"
         
-        return prompt
+        high_conf = [c['value'] for c in competency if c.get('confidence', 0) > 0.75]
+        return ", ".join(high_conf[:2]) if high_conf else "General CBC learning support"
+    
+    @staticmethod
+    def _get_bloom_instruction(bloom_level: str) -> str:
+        """Get Bloom's level-specific instruction"""
+        instructions = {
+            'Remember': 'Help recall key facts and concepts',
+            'Understand': 'Explain concepts with clear examples',
+            'Apply': 'Guide practical problem-solving',
+            'Analyze': 'Break down and examine relationships',
+            'Evaluate': 'Support critical assessment',
+            'Create': 'Facilitate synthesis of new ideas'
+        }
+        return instructions.get(bloom_level, 'Provide educational support')
