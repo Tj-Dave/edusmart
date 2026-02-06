@@ -1,5 +1,8 @@
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy import text
+
+from app.db.postgres import engine
 
 from app.core.config import settings
 from app.services.llm.llama_cpp_client import LLMClient
@@ -11,9 +14,12 @@ from app.services.competency_mapper import CompetencyMapper
 from app.services.bloom_detector import BloomDetector
 from app.services.rag_engine import RAGEngine
 from app.db.vector_store import VectorStore
-from app.services.memory.memory_manager import MemoryManager
+from app.services.memory.memory_manager import MemoryManagerPG
 
 from app.routes.ai_query import router as ai_query_router
+
+from app.routes.chats import router as chats_router
+from app.routes.auth_demo import router as auth_router
 
 app = FastAPI(title="EduSmart Backend")
 
@@ -28,13 +34,12 @@ competency_mapper = CompetencyMapper(embedder)
 bloom_detector = BloomDetector()          # if this loads a model, keep it here too
 rag_engine = RAGEngine(vector_store=vector_store, embedder=embedder)                  # you’ll later inject embedder into this too
 
-memory_manager = MemoryManager(
-    sqlite_path=str(settings.BASE_DIR / "data" / "chat_memory.sqlite"),
+memory_manager = MemoryManagerPG(
     vector_store=vector_store,
     embed_query=embedder.embed_query,
-    embed_texts=embedder.embed_texts,  # passage embeddings for stored memory
-    phi3=llm_subclient,                # Phi-3 mini summarizer
-    app_namespace="edusmart"
+    embed_texts=embedder.embed_texts,
+    phi3=llm_subclient,
+    app_namespace="edusmart",
 )
 
 # Store in app.state
@@ -51,6 +56,9 @@ app.state.memory_manager = memory_manager
 
 app.include_router(ai_query_router)
 
+app.include_router(auth_router)
+app.include_router(chats_router)
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -64,3 +72,9 @@ async def test_llm():
 async def test_multi_query(q: str):
     variants = app.state.multi_query_service.generate_variants(q, n=5)
     return {"original_query": q, "variants": variants}
+
+@app.get("/db-health")
+def db_health():
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    return {"db": "ok"}

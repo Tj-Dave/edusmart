@@ -2,7 +2,10 @@ from functools import lru_cache
 from pydantic_settings import BaseSettings
 from typing import List, ClassVar
 from pathlib import Path
+import os
+from dotenv import load_dotenv
 
+load_dotenv()  # loads backend/.env
 
 class Settings(BaseSettings):
     # =====================================================
@@ -24,6 +27,12 @@ class Settings(BaseSettings):
 
     FASTAPI_WORKERS: int = 1
     FASTAPI_RELOAD: bool = True
+
+    # =====================================================
+    # Database Configuration
+    # =====================================================
+
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
     # =====================================================
     # llama.cpp (shared)
