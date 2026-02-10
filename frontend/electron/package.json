@@ -1,0 +1,12 @@
+{
+  "name": "edusmart-desktop",
+  "version": "0.1.0",
+  "description": "EduSmart offline assistant prototype",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^28.2.0"
+  }
+}

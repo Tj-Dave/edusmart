@@ -67,6 +67,9 @@ class User(Base):
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
+    # Lecturer approval workflow (for frontend routing)
+    approved: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -116,6 +119,7 @@ class UserProfile(Base):
     program: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     year_of_study: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    courses: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Comma-separated or JSON
 
     phone: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

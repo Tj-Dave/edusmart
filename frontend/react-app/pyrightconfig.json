@@ -1,0 +1,5 @@
+{
+  "typeCheckingMode": "strict",
+  "exclude": ["node_modules"],
+  "include": ["src"]
+}

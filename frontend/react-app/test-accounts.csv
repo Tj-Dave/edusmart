@@ -1,0 +1,8 @@
+email,name,role,department,courses,approved
+sarah@student.must.ac.ug,Sarah Namukasa,student,Biology,BIO101,true
+moses@student.must.ac.ug,Moses Okello,student,Chemistry,CHEM101,true
+grace@student.must.ac.ug,Grace Nanyonjo,student,Physics,PHY101,true
+dr.akello@must.ac.ug,Dr. Akello,lecturer,Biology,BIO101,true
+dr.namukasa@must.ac.ug,Dr. Namukasa,lecturer,Chemistry,CHEM101,false
+prof.okello@must.ac.ug,Prof. Okello,lecturer,Physics,PHY101,true
+admin@must.ac.ug,Admin User,admin,,, true
