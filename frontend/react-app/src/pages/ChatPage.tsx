@@ -1,0 +1,1171 @@
+// src/pages/ChatPage.tsx
+import React, { useEffect, useState, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useCourseStore } from '../state/courseStore';
+import { useAuth } from '../state/AuthContext';
+import { chatApi, ingestionApi } from '../services/api';
+
+interface Citation {
+  id?: string;
+  title: string;
+  snippet?: string;
+  source?: string;
+  role?: string;
+  url?: string;
+}
+
+interface Message {
+  id?: number;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp?: string;
+  citations?: Citation[];
+  hiddenCitationCount?: number;
+}
+
+interface ChatSession {
+  id: string;
+  course_code: string;
+  course_name: string;
+  created_at: string;
+  message_count: number;
+}
+
+interface ChatHistory {
+  session_id: string;
+  title: string;
+  created_at: string;
+  message_preview?: string;
+}
+
+interface ChatPageProps {
+  publicMode?: boolean;
+}
+
+const PUBLIC_PREVIEW_COURSE = {
+  code: 'DEMO101',
+  name: 'EduSmart Demo Course',
+};
+
+const DEFAULT_CHAT_TITLE = 'Chat name';
+
+const DEMO_AUTH_TOKEN = ((import.meta.env.VITE_DEMO_AUTH_TOKEN as string) || '').trim();
+
+const DEMO_REFERENCE_CITATIONS: Citation[] = [
+  {
+    id: 'demo-1',
+    title: 'Lecturer Strategy Deck',
+    snippet: 'Slides outlining Bloom ladders plus coaching prompts for cell division labs.',
+    source: 'StrategyDeck_CellDivision.pdf',
+    role: 'lecturer',
+  },
+  {
+    id: 'demo-2',
+    title: 'Formative Check Bank',
+    snippet: 'Quick checks mapped to competency levels 1–3 for mitosis vs meiosis.',
+    source: 'FormativeBank_Mitosis.docx',
+    role: 'lecturer',
+  },
+];
+
+const deriveSessionId = (payload: Partial<ChatSession> & { id?: string | number; session_id?: string | number; chat_id?: string | number }) => {
+  if (!payload) return undefined;
+  return payload.id?.toString() || payload.session_id?.toString() || payload.chat_id?.toString();
+};
+
+const buildLocalDemoAssistantReply = (prompt: string): Message => {
+  const sanitizedPrompt = prompt.replace(/\s+/g, ' ').trim();
+  const content = `Here is how I'd coach “${sanitizedPrompt}” inside ${PUBLIC_PREVIEW_COURSE.name}:
+
+1. **Bloom focus** — start with a recall nudge (“Summarize ${sanitizedPrompt} in one sentence”), then climb to application (“Give the lab scenario where this breaks”).
+2. **Reference packs** — I’ll cite the lecturer decks above so students see the provenance.
+3. **Actionable follow-up** — close with a formative check or mini-brief so it lands in your LMS.`;
+
+  return {
+    role: 'assistant',
+    content,
+    timestamp: new Date().toISOString(),
+    citations: DEMO_REFERENCE_CITATIONS,
+    hiddenCitationCount: 2,
+  };
+};
+
+export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
+  const navigate = useNavigate();
+  const { courseCode, courseName } = useCourseStore();
+  const { user, logout } = useAuth();
+  const isPublicPreview = publicMode;
+  const activeCourseCode = isPublicPreview ? PUBLIC_PREVIEW_COURSE.code : courseCode;
+  const activeCourseName = isPublicPreview
+    ? PUBLIC_PREVIEW_COURSE.name
+    : courseName || courseCode || PUBLIC_PREVIEW_COURSE.name;
+  const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
+  const [chatHistory, setChatHistory] = useState<ChatHistory[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [inputValue, setInputValue] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isFetchingSession, setIsFetchingSession] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(() => (typeof window !== 'undefined' ? window.innerWidth >= 1024 : true));
+  const [showSwitchCourseConfirm, setShowSwitchCourseConfirm] = useState(false);
+  const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
+  const [showSettingsMenu, setShowSettingsMenu] = useState(false);
+  const [showComposerExtras, setShowComposerExtras] = useState(false);
+  const [referenceFile, setReferenceFile] = useState<File | null>(null);
+  const [isUploadingReference, setIsUploadingReference] = useState(false);
+  const [referenceUploadFeedback, setReferenceUploadFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const [publicQueryCount, setPublicQueryCount] = useState(0);
+  const [showPublicLimitModal, setShowPublicLimitModal] = useState(false);
+  const [currentChatTitle, setCurrentChatTitle] = useState(DEFAULT_CHAT_TITLE);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
+  const token = localStorage.getItem('auth_token') || '';
+  const demoToken = DEMO_AUTH_TOKEN;
+  const isDemoBackendAvailable = Boolean(demoToken);
+  const useLocalDemo = isPublicPreview && !isDemoBackendAvailable;
+  const authToken = isPublicPreview ? (isDemoBackendAvailable ? demoToken : null) : token;
+
+  const getCitationRole = (citation: any): string => {
+    const roleCandidate = citation?.role || citation?.uploader_role || citation?.source_role || citation?.metadata?.uploader_role;
+    return typeof roleCandidate === 'string' ? roleCandidate.toLowerCase() : '';
+  };
+
+  const mapCitation = (citation: any): Citation => ({
+    id: citation?.id?.toString() || citation?.document_id?.toString() || undefined,
+    title: citation?.title || citation?.file_name || citation?.source || 'Reference material',
+    snippet: citation?.snippet || citation?.summary || citation?.text || '',
+    source: citation?.source || citation?.file_name || citation?.document_id,
+    role: getCitationRole(citation),
+    url: citation?.url || citation?.link,
+  });
+
+  const bumpPublicUsage = () => {
+    setPublicQueryCount(prev => {
+      const next = prev + 1;
+      if (next >= 3) {
+        setShowPublicLimitModal(true);
+      }
+      return next;
+    });
+  };
+
+  const deriveChatTitle = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return DEFAULT_CHAT_TITLE;
+    }
+    return trimmed.length > 40 ? `${trimmed.slice(0, 40).trim()}…` : trimmed;
+  };
+
+  // Initialize chat session on mount
+  useEffect(() => {
+    if (!isPublicPreview && !courseCode) {
+      navigate('/course-selection');
+      return;
+    }
+
+    if (useLocalDemo) {
+      const timestamp = new Date();
+      const chatId = `demo-local-${Date.now()}`;
+      setIsFetchingSession(true);
+      setCurrentSession({
+        id: chatId,
+        course_code: PUBLIC_PREVIEW_COURSE.code,
+        course_name: PUBLIC_PREVIEW_COURSE.name,
+        created_at: timestamp.toISOString(),
+        message_count: 0,
+      });
+      setChatHistory([
+        {
+          session_id: chatId,
+          title: DEFAULT_CHAT_TITLE,
+          created_at: timestamp.toISOString(),
+        },
+      ]);
+      setMessages([]);
+      setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+      setError(null);
+      setIsFetchingSession(false);
+      return;
+    }
+
+    const initializeChat = async () => {
+      try {
+        setIsFetchingSession(true);
+        const timestamp = new Date();
+        const sessionCourseCode = activeCourseCode || PUBLIC_PREVIEW_COURSE.code;
+        const sessionCourseName = activeCourseName || sessionCourseCode;
+
+        if (isPublicPreview) {
+          if (!authToken) {
+            setError('Demo chat token missing. Please refresh.');
+            return;
+          }
+          const createdSession = await chatApi.createSession(authToken, sessionCourseCode, 'Demo Course Preview');
+          const sessionId = deriveSessionId(createdSession) || `demo-${Date.now()}`;
+          const createdAt = createdSession?.created_at || timestamp.toISOString();
+          setCurrentSession({
+            id: sessionId,
+            course_code: createdSession?.course_code || sessionCourseCode,
+            course_name: createdSession?.course_name || sessionCourseName,
+            created_at: createdAt,
+            message_count: 0,
+          });
+          setChatHistory([
+            {
+              session_id: sessionId,
+              title: DEFAULT_CHAT_TITLE,
+              created_at: createdAt,
+            },
+          ]);
+          setMessages([]);
+          setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+          setError(null);
+          return;
+        }
+
+        const chatId = `local-${Date.now()}`;
+        setCurrentSession({
+          id: chatId,
+          course_code: courseCode!,
+          course_name: courseName || courseCode!,
+          created_at: timestamp.toISOString(),
+          message_count: 0,
+        });
+
+        setChatHistory([
+          {
+            session_id: chatId,
+            title: DEFAULT_CHAT_TITLE,
+            created_at: timestamp.toISOString(),
+          },
+        ]);
+
+        setMessages([]);
+        setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+        setError(null);
+      } catch (err: any) {
+        console.error('Failed to initialize chat:', err);
+        setError('Failed to initialize chat. Please try again.');
+      } finally {
+        setIsFetchingSession(false);
+      }
+    };
+
+    initializeChat();
+  }, [token, courseCode, courseName, navigate, isPublicPreview, activeCourseCode, activeCourseName, authToken, useLocalDemo]);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth >= 1024) {
+        setSidebarOpen(true);
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // ==================== HANDLERS ====================
+  
+  const sendMessage = async () => {
+    if (!inputValue.trim() || !currentSession?.id || isLoading) return;
+
+    if (isPublicPreview && publicQueryCount >= 3) {
+      setShowPublicLimitModal(true);
+      setError(null);
+      return;
+    }
+
+    const trimmedMessage = inputValue.trim();
+    const isFirstMessage = messages.length === 0;
+
+    const userMessage: Message = {
+      role: 'user',
+      content: trimmedMessage,
+      timestamp: new Date().toISOString(),
+    };
+
+    setMessages(prev => [...prev, userMessage]);
+    setInputValue('');
+    setShowComposerExtras(false);
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      if (useLocalDemo) {
+        const aiMessage = buildLocalDemoAssistantReply(trimmedMessage);
+        setMessages(prev => [...prev, aiMessage]);
+
+        if (isFirstMessage) {
+          const chatTitle = deriveChatTitle(trimmedMessage);
+          setChatHistory(prev =>
+            prev.map(chat =>
+              chat.session_id === currentSession.id
+                ? { ...chat, title: chatTitle }
+                : chat
+            )
+          );
+          setCurrentChatTitle(chatTitle);
+        }
+
+        setCurrentSession(prev =>
+          prev ? { ...prev, message_count: prev.message_count + 2 } : null
+        );
+        if (isPublicPreview) {
+          bumpPublicUsage();
+        }
+        return;
+      }
+
+      if (!authToken) {
+        setError('Your session expired. Please log in again.');
+        return;
+      }
+
+      const response = await chatApi.sendMessage(authToken, currentSession.id, userMessage.content);
+
+      const rawCitations = Array.isArray(response?.citations)
+        ? response.citations
+        : Array.isArray(response?.references)
+        ? response.references
+        : [];
+      const lecturerCitations = rawCitations
+        .filter((citation: any) => getCitationRole(citation) === 'lecturer')
+        .map(mapCitation);
+      const hiddenCitationCount = rawCitations.length - lecturerCitations.length;
+
+      const aiMessage: Message = {
+        id: response.message_id,
+        role: 'assistant',
+        content: response.response || 'I apologize, but I could not generate a response. Please try again.',
+        timestamp: new Date().toISOString(),
+        citations: lecturerCitations,
+        hiddenCitationCount: hiddenCitationCount > 0 ? hiddenCitationCount : undefined,
+      };
+      setMessages(prev => [...prev, aiMessage]);
+
+      if (isFirstMessage) {
+        const chatTitle = deriveChatTitle(trimmedMessage);
+        setChatHistory(prev =>
+          prev.map(chat =>
+            chat.session_id === currentSession.id
+              ? { ...chat, title: chatTitle }
+              : chat
+          )
+        );
+        setCurrentChatTitle(chatTitle);
+      }
+
+      setCurrentSession(prev =>
+        prev ? { ...prev, message_count: prev.message_count + 2 } : null
+      );
+      if (isPublicPreview) {
+        bumpPublicUsage();
+      }
+    } catch (err: any) {
+      console.error('Failed to send message:', err);
+      setError('Failed to send message. Please try again.');
+      setMessages(prev => prev.slice(0, -1));
+      setInputValue(trimmedMessage);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await sendMessage();
+  };
+
+  const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const handleReferenceFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] || null;
+    setReferenceFile(file);
+    setReferenceUploadFeedback(null);
+  };
+
+  const handleClearReferenceFile = () => {
+    setReferenceFile(null);
+    setReferenceUploadFeedback(null);
+    if (referenceFileInputRef.current) {
+      referenceFileInputRef.current.value = '';
+    }
+  };
+
+  const handleReferenceUpload = async () => {
+    if (isPublicPreview) {
+      setReferenceUploadFeedback({ kind: 'error', text: 'Sign in to sync your lecturer packs into the knowledge base.' });
+      return;
+    }
+    if (!referenceFile) {
+      setReferenceUploadFeedback({ kind: 'error', text: 'Select a document before uploading.' });
+      return;
+    }
+
+    try {
+      setIsUploadingReference(true);
+      setReferenceUploadFeedback(null);
+      const result = await ingestionApi.uploadDocument(token, referenceFile);
+      const filename = result?.filename || referenceFile.name;
+      const chunkSummary = typeof result?.total_chunks === 'number'
+        ? `${result.total_chunks} sections indexed`
+        : 'Document ingested';
+      setReferenceUploadFeedback({
+        kind: 'success',
+        text: `${filename} uploaded • ${chunkSummary}. Backend syncing to the RAG store now.`,
+      });
+      setReferenceFile(null);
+      if (referenceFileInputRef.current) {
+        referenceFileInputRef.current.value = '';
+      }
+    } catch (err: any) {
+      setReferenceUploadFeedback({
+        kind: 'error',
+        text: err?.message || 'Upload failed. Please try again.',
+      });
+    } finally {
+      setIsUploadingReference(false);
+    }
+  };
+
+  const handleNewChat = async () => {
+    if (useLocalDemo) {
+      const timestamp = new Date();
+      const chatId = `demo-local-${Date.now()}`;
+      setChatHistory(prev => [
+        {
+          session_id: chatId,
+          title: DEFAULT_CHAT_TITLE,
+          created_at: timestamp.toISOString(),
+        },
+        ...prev,
+      ]);
+      setCurrentSession({
+        id: chatId,
+        course_code: PUBLIC_PREVIEW_COURSE.code,
+        course_name: PUBLIC_PREVIEW_COURSE.name,
+        created_at: timestamp.toISOString(),
+        message_count: 0,
+      });
+      setMessages([]);
+      setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+      setError(null);
+      setPublicQueryCount(0);
+      setShowPublicLimitModal(false);
+      return;
+    }
+
+    if (isPublicPreview) {
+      if (!authToken) {
+        setError('Demo chat token missing. Please refresh the page.');
+        return;
+      }
+      try {
+        setIsLoading(true);
+        const timestamp = new Date();
+        const createdSession = await chatApi.createSession(authToken, PUBLIC_PREVIEW_COURSE.code, 'Demo chat');
+        const sessionId = deriveSessionId(createdSession) || `demo-${Date.now()}`;
+        const createdAt = createdSession?.created_at || timestamp.toISOString();
+        const normalizedSession: ChatSession = {
+          id: sessionId,
+          course_code: createdSession?.course_code || PUBLIC_PREVIEW_COURSE.code,
+          course_name: createdSession?.course_name || PUBLIC_PREVIEW_COURSE.name,
+          created_at: createdAt,
+          message_count: 0,
+        };
+        setCurrentSession(normalizedSession);
+        setChatHistory([
+          {
+            session_id: sessionId,
+            title: DEFAULT_CHAT_TITLE,
+            created_at: createdAt,
+          },
+        ]);
+        setMessages([]);
+        setError(null);
+        setPublicQueryCount(0);
+        setShowPublicLimitModal(false);
+        setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+      } catch (err) {
+        console.error('Failed to start demo chat session:', err);
+        setError('Unable to start a new demo chat right now. Please try again shortly.');
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    // Create local chat entry (no backend call)
+    const timestamp = new Date();
+    const chatId = `local-${Date.now()}`;
+    
+    setChatHistory(prev => [
+      {
+        session_id: chatId,
+        title: DEFAULT_CHAT_TITLE,
+        created_at: timestamp.toISOString(),
+      },
+      ...prev,
+    ]);
+
+    // Update current session to track the new chat
+    setCurrentSession(prev =>
+      prev ? { ...prev, id: chatId, message_count: 0, created_at: timestamp.toISOString() } : null
+    );
+
+    // Clear messages
+    setMessages([]);
+    setError(null);
+    setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+  };
+
+  const handleSelectChat = async (sessionId: string) => {
+    if (isPublicPreview) return;
+    if (!courseCode) return;
+    
+    try {
+      setIsLoading(true);
+      // TODO: Fetch chat history from backend
+      // const messages = await chatApi.getMessages(token, sessionId);
+      // setMessages(messages);
+      
+      // For now, just clear messages and update session
+      const selectedChat = chatHistory.find(c => c.session_id === sessionId);
+      if (selectedChat) {
+        setCurrentSession({
+          id: sessionId,
+          course_code: courseCode,
+          course_name: courseName || courseCode,
+          created_at: selectedChat.created_at,
+          message_count: 0,
+        });
+        setMessages([]);
+        setError(null);
+        setOpenMenuSessionId(null);
+        setCurrentChatTitle(selectedChat.title || DEFAULT_CHAT_TITLE);
+      }
+    } catch (err: any) {
+      console.error('Failed to load chat:', err);
+      setError('Failed to load chat. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSwitchCourse = () => {
+    if (isPublicPreview) {
+      navigate('/login');
+      return;
+    }
+    setShowSwitchCourseConfirm(true);
+  };
+
+  const confirmSwitchCourse = () => {
+    // Clear all context and redirect
+    setShowSwitchCourseConfirm(false);
+    navigate('/course-selection');
+  };
+
+  const handleLogout = () => {
+    logout();
+    setShowSettingsMenu(false);
+    navigate('/login');
+  };
+
+  const handleAccountSettings = () => {
+    setShowSettingsMenu(false);
+    navigate('/account-settings');
+  };
+
+  const handleGeneralSettings = () => {
+    setShowSettingsMenu(false);
+    navigate('/general-settings');
+  };
+
+  const handleDeleteChat = (sessionId: string) => {
+    if (isPublicPreview) return;
+    // Remove from chat history
+    setChatHistory(prev => prev.filter(chat => chat.session_id !== sessionId));
+    setOpenMenuSessionId(null);
+    
+    // If we're viewing the deleted chat, switch to the first available or clear
+    if (currentSession?.id === sessionId) {
+      const remaining = chatHistory.filter(chat => chat.session_id !== sessionId);
+      if (remaining.length > 0) {
+        handleSelectChat(remaining[0].session_id);
+      } else {
+        setCurrentSession(prev =>
+          prev ? { ...prev, id: `local-${Date.now()}`, message_count: 0 } : null
+        );
+        setMessages([]);
+      }
+    }
+  };
+
+  if (!courseCode && !isPublicPreview) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <p className="text-xl text-gray-700 mb-4">No course selected</p>
+          <button
+            onClick={() => navigate('/course-selection')}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+          >
+            Select a Course
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (isFetchingSession) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block mb-4">
+            <div className="w-8 h-8 border-4 border-gray-300 border-t-blue-600 rounded-full animate-spin"></div>
+          </div>
+          <p className="text-gray-600">Starting chat session...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 text-gray-900 flex flex-col lg:flex-row">
+      {/* Sidebar */}
+      <div
+        className={`${
+          sidebarOpen ? 'w-full max-h-[70vh] lg:w-72' : 'w-full max-h-0 lg:w-0'
+        } lg:max-h-none transition-all duration-300 overflow-hidden bg-white border-b border-gray-200 lg:border-b-0 lg:border-r text-gray-900 flex flex-col shadow-sm`}
+      >
+        {/* Sidebar Header */}
+        <div className="p-4 border-b border-gray-200">
+          <button
+            onClick={handleNewChat}
+            disabled={isFetchingSession || (isPublicPreview && isLoading)}
+            className="w-full px-4 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed font-medium text-sm transition flex items-center justify-center gap-2"
+          >
+            <span>+</span> {isPublicPreview ? 'New Demo Chat' : 'New Chat'}
+          </button>
+        </div>
+
+        {/* Chat History */}
+        <div className="flex-1 overflow-y-auto p-4">
+            {chatHistory.length === 0 ? (
+              <div className="text-center text-gray-400 text-xs py-8">
+              <p>No chats yet</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {chatHistory.map((chat) => (
+                <div
+                  key={chat.session_id}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-xl transition group ${
+                    currentSession?.id === chat.session_id
+                      ? 'bg-blue-50 text-blue-900 border border-blue-200'
+                      : 'hover:bg-gray-100 text-gray-600'
+                  }`}
+                >
+                  <button
+                    onClick={() => handleSelectChat(chat.session_id)}
+                    className="flex-1 text-left"
+                    title={chat.title}
+                  >
+                    <div className="truncate font-medium text-sm">{chat.title}</div>
+                    <div className={`text-xs truncate ${
+                      currentSession?.id === chat.session_id ? 'text-blue-500' : 'text-gray-400'
+                    }`}>
+                      {new Date(chat.created_at).toLocaleDateString()}
+                    </div>
+                  </button>
+                  {!isPublicPreview && (
+                    <div className="relative">
+                      <button
+                        onClick={() => setOpenMenuSessionId(openMenuSessionId === chat.session_id ? null : chat.session_id)}
+                        className={`p-1.5 rounded transition ${
+                          currentSession?.id === chat.session_id
+                            ? 'hover:bg-blue-100 text-blue-600'
+                            : 'hover:bg-gray-200 text-gray-500'
+                        }`}
+                        title="Chat options"
+                      >
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" />
+                        </svg>
+                      </button>
+                      {openMenuSessionId === chat.session_id && (
+                        <div className="absolute right-0 mt-1 w-32 bg-white border border-gray-200 rounded-lg shadow-lg z-10">
+                          <button
+                            onClick={() => handleDeleteChat(chat.session_id)}
+                            className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition flex items-center gap-2"
+                          >
+                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                              <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                            </svg>
+                            Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Sidebar Footer */}
+        <div className="border-t border-gray-200 p-4">
+          {isPublicPreview ? (
+            <div className="text-center text-xs text-gray-500 space-y-2">
+              <p>Bring EduSmart into your actual modules by signing in.</p>
+              <button
+                onClick={() => navigate('/login')}
+                className="w-full px-4 py-2 bg-blue-50 text-blue-700 rounded-xl font-semibold hover:bg-blue-100 transition"
+              >
+                Sign in to unlock courses
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={handleSwitchCourse}
+              className="w-full px-4 py-2 bg-white border border-gray-300 rounded-xl font-medium text-xs tracking-wide hover:bg-gray-50 transition"
+            >
+              Switch Course
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col relative bg-gray-50">
+        {/* Header */}
+        <div className="bg-white border-b border-gray-200 px-4 sm:px-8 py-4">
+          <div className="flex flex-wrap items-center gap-4 justify-between">
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+              <button
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                className="p-2 rounded-xl border border-gray-200 bg-white text-gray-500 hover:bg-gray-50 transition"
+                title={sidebarOpen ? 'Collapse chat history' : 'Expand chat history'}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d={sidebarOpen ? 'M6 18L18 6M6 6l12 12' : 'M4 6h16M4 12h16M4 18h16'}
+                  />
+                </svg>
+              </button>
+              <div className="min-w-0">
+                <p className="text-xs uppercase tracking-[0.2em] text-gray-400">Chat title</p>
+                <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 truncate">{currentChatTitle}</h1>
+                <p className="text-sm text-gray-500">
+                  {isPublicPreview ? (
+                    <span>{PUBLIC_PREVIEW_COURSE.name} • Demo context</span>
+                  ) : (
+                    <span>{activeCourseName} • {activeCourseCode}</span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            {/* Settings Menu */}
+            <div className="relative">
+              {isPublicPreview ? (
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => navigate('/login')}
+                    className="px-4 py-2 rounded-xl border border-gray-200 text-sm font-semibold text-gray-700 hover:bg-gray-50 transition"
+                  >
+                    Log in
+                  </button>
+                  <button
+                    onClick={() => navigate('/signup')}
+                    className="px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-500 transition"
+                  >
+                    Create account
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    onClick={() => setShowSettingsMenu(!showSettingsMenu)}
+                    className="p-2 rounded-xl border border-gray-200 bg-white text-gray-500 hover:bg-gray-50 transition"
+                    title="Account & Settings"
+                  >
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" />
+                    </svg>
+                  </button>
+
+                  {showSettingsMenu && (
+                    <div className="absolute right-0 mt-2 w-64 bg-white border border-gray-200 rounded-2xl shadow-xl z-50">
+                      <div className="px-4 py-3 border-b border-gray-200">
+                        <p className="text-sm font-semibold text-gray-900">{user?.full_name || user?.username}</p>
+                        <p className="text-xs text-gray-500">{user?.email}</p>
+                        <p className="text-xs text-gray-400 mt-1 capitalize">Role: {user?.role}</p>
+                      </div>
+
+                      <div className="py-2">
+                        <button
+                          onClick={handleAccountSettings}
+                          className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-50 transition flex items-center gap-2"
+                        >
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M10.5 1.5H3.75A2.25 2.25 0 001.5 3.75v12.5A2.25 2.25 0 003.75 18.5h12.5a2.25 2.25 0 002.25-2.25V9.5m-15-4h12m-12 4v8m12-8v3m0-3l4.5-4.5m0 0L20 1.5" />
+                          </svg>
+                          Account Settings
+                        </button>
+
+                        <button
+                          onClick={handleGeneralSettings}
+                          className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-50 transition flex items-center gap-2"
+                        >
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM11 13a2 2 0 11-4 0 2 2 0 014 0z" clipRule="evenodd" />
+                          </svg>
+                          Settings
+                        </button>
+                      </div>
+
+                      <div className="border-t border-gray-200 py-2">
+                        <button
+                          onClick={handleLogout}
+                          className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition flex items-center gap-2"
+                        >
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clipRule="evenodd" />
+                          </svg>
+                          Logout
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Messages Container */}
+        <div className="flex-1 overflow-y-auto px-4 sm:px-8 py-8">
+          {messages.length === 0 ? (
+            <div className="flex items-center justify-center h-full">
+              <div className="text-center max-w-lg bg-white border border-gray-200 rounded-3xl px-8 py-10 shadow-lg">
+                <div className="text-5xl mb-4">💡</div>
+                <h2 className="text-2xl font-semibold text-gray-900 mb-3">Drop your first prompt</h2>
+                <p className="text-gray-500">
+                  {isPublicPreview
+                    ? 'This preview uses our demo corpus so you can feel the real chat flow. Sign in when you are ready to bring in your lecturers and uploads.'
+                    : `You are grounded in ${activeCourseName}. Ask anything and EduSmart will cite the lecturer materials you have uploaded.`}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4 max-w-4xl mx-auto">
+              {messages.map((msg, idx) => (
+                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div
+                    className={`max-w-2xl ${
+                      msg.role === 'user'
+                        ? 'bg-blue-600 text-white rounded-3xl rounded-tr-none px-5 py-3 shadow-lg shadow-blue-200'
+                        : 'bg-white text-gray-900 rounded-3xl rounded-tl-none px-5 py-3 border border-gray-100 shadow'
+                    }`}
+                  >
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                    {msg.timestamp && (
+                      <p className={`text-xs mt-2 ${msg.role === 'user' ? 'text-blue-100' : 'text-gray-400'}`}>
+                        {new Date(msg.timestamp).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </p>
+                    )}
+                    {msg.role === 'assistant' && msg.citations && msg.citations.length > 0 && (
+                      <div className="mt-3 border-t border-gray-100 pt-3">
+                        <p className="text-[11px] uppercase tracking-[0.2em] text-gray-400 mb-2">Lecturer citations</p>
+                        <div className="space-y-2">
+                          {msg.citations.map((citation, citationIdx) => (
+                            <div key={citation.id || `citation-${citationIdx}`} className="text-xs text-gray-600">
+                              <p className="font-semibold text-gray-800">{citation.title}</p>
+                              {citation.snippet && <p className="text-gray-500 mt-1">{citation.snippet}</p>}
+                              <p className="text-[11px] text-gray-400 mt-1">{citation.source ? `Source: ${citation.source}` : 'Lecturer upload'}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {msg.role === 'assistant' && msg.hiddenCitationCount && (
+                      <p className="text-[11px] text-amber-600 mt-2">
+                        Hidden {msg.hiddenCitationCount} reference{msg.hiddenCitationCount > 1 ? 's' : ''} because they were not uploaded by verified lecturers.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {isLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-white text-gray-500 rounded-3xl rounded-tl-none px-5 py-3 border border-gray-100 shadow">
+                    <div className="flex gap-1">
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
+
+        {/* Error Message */}
+        {error && (
+          <div className="px-4 sm:px-8 py-3 bg-red-50 border-l-4 border-red-400">
+            <p className="text-sm text-red-700">{error}</p>
+          </div>
+        )}
+
+        {/* Input Area */}
+        <div className="border-t border-gray-200 bg-white px-4 sm:px-8 py-6">
+          <form onSubmit={handleSendMessage} className="max-w-4xl mx-auto w-full">
+            <div className="bg-white border border-gray-200 rounded-3xl px-4 sm:px-6 py-4 shadow-xl space-y-4">
+              <div className="flex items-start gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowComposerExtras(prev => !prev)}
+                  disabled={isPublicPreview}
+                  className={`p-2 rounded-2xl border ${showComposerExtras ? 'border-blue-500 text-blue-600' : 'border-gray-200 text-gray-500'} bg-white hover:border-blue-500 hover:text-blue-600 transition ${isPublicPreview ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  aria-pressed={showComposerExtras}
+                  title={isPublicPreview ? 'Sign in to attach lecturer uploads' : 'Composer options'}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                </button>
+
+                <textarea
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyDown={handleComposerKeyDown}
+                  placeholder={`Ask EduSmart anything about ${activeCourseName || 'this course'}...`}
+                  className="flex-1 bg-transparent border-none text-base text-gray-900 placeholder:text-gray-400 focus:ring-0 focus:outline-none resize-none min-h-[56px] max-h-48"
+                  rows={1}
+                  disabled={isLoading}
+                  maxLength={2000}
+                />
+
+                <div className="flex items-center">
+                  <button
+                    type="submit"
+                    disabled={isLoading || !inputValue.trim() || !currentSession}
+                    className="p-2.5 rounded-2xl bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition shadow-lg shadow-blue-200"
+                    title="Send"
+                  >
+                    {isLoading ? (
+                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-30" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {!isPublicPreview && showComposerExtras && (
+                <div className="border border-dashed border-gray-300 rounded-2xl px-4 py-4 text-sm text-gray-600 space-y-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-gray-800">Attach supporting material</p>
+                      <p className="text-xs text-gray-500">PDF, DOCX, or PPTX files are accepted and will sync straight into the RAG folders.</p>
+                    </div>
+                    <label className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-gray-200 text-sm text-gray-600 hover:border-blue-400 hover:text-blue-600 transition cursor-pointer">
+                      <input
+                        ref={referenceFileInputRef}
+                        type="file"
+                        accept=".pdf,.docx,.pptx"
+                        className="hidden"
+                        onChange={handleReferenceFileChange}
+                        disabled={isUploadingReference}
+                      />
+                      <span>{referenceFile ? 'Change file' : 'Choose file'}</span>
+                    </label>
+                  </div>
+
+                  {referenceFile && (
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">{referenceFile.name}</p>
+                        <p className="text-xs text-gray-500">{(referenceFile.size / (1024 * 1024)).toFixed(2)} MB</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleClearReferenceFile}
+                        className="text-sm text-gray-500 hover:text-red-500 transition"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleReferenceUpload}
+                      disabled={!referenceFile || isUploadingReference}
+                      className="px-4 py-2 rounded-full bg-blue-600 text-white text-sm font-medium hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    >
+                      {isUploadingReference ? 'Uploading...' : 'Upload to knowledge base'}
+                    </button>
+                    {isUploadingReference && <span className="text-xs text-gray-500">Processing and syncing to RAG...</span>}
+                  </div>
+
+                  {referenceUploadFeedback && (
+                    <div className={`text-sm ${referenceUploadFeedback.kind === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                      {referenceUploadFeedback.text}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between text-xs text-gray-500 pt-3 border-t border-gray-200">
+                <div className="flex items-center gap-3">
+                  <span className="flex items-center gap-1">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6l4 2" />
+                    </svg>
+                    Press Enter to send
+                  </span>
+                  <span className="hidden sm:inline">• Shift + Enter for new line</span>
+                  {isPublicPreview && (
+                    <span className="flex items-center gap-1 text-blue-700 font-medium">
+                      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M2.166 12.334L8.5 3.5l5.053 4.79 2.167-.98L11.5 1.5l-9 12.5h5l-1 4.5 5.834-6.166L11 10l-4.334 2.334h-4.5z" />
+                      </svg>
+                      Demo mode uses {PUBLIC_PREVIEW_COURSE.name} references
+                    </span>
+                  )}
+                </div>
+                <span>{inputValue.length}/2000</span>
+              </div>
+
+              {isPublicPreview && (
+                <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-900 space-y-3">
+                  <p className="font-semibold">Flip this into your real LMS: sign in and EduSmart will cite your lecturers, rubrics, and uploader docs.</p>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={() => navigate('/login')}
+                      className="px-4 py-2 rounded-xl bg-blue-600 text-white font-semibold hover:bg-blue-500 transition"
+                    >
+                      Log in
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/signup')}
+                      className="px-4 py-2 rounded-xl border border-blue-200 text-blue-700 font-semibold hover:bg-blue-100 transition"
+                    >
+                      Create account
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </form>
+        </div>
+
+        {/* Switch Course Confirmation Modal */}
+        {!isPublicPreview && showSwitchCourseConfirm && (
+          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
+            <div className="bg-white border border-gray-200 rounded-3xl shadow-2xl shadow-blue-100/80 p-6 max-w-md w-full">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center text-2xl">
+                  ⚠️
+                </div>
+                <div>
+                  <h2 className="text-2xl font-semibold text-gray-900">Switch course?</h2>
+                  <p className="text-sm text-gray-500">You will start fresh, but {activeCourseName} chats stay in the sidebar.</p>
+                </div>
+              </div>
+
+              <p className="text-sm text-gray-500 mb-6">
+                We will automatically keep your existing chats organized, so you can switch courses without losing anything.
+              </p>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <button
+                  onClick={confirmSwitchCourse}
+                  className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-500 font-medium transition"
+                >
+                  Continue
+                </button>
+                <button
+                  onClick={() => setShowSwitchCourseConfirm(false)}
+                  className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-700 rounded-xl hover:border-gray-300 font-medium transition"
+                >
+                  Stay here
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Public Preview Limit Modal */}
+        {isPublicPreview && showPublicLimitModal && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+            <div className="bg-white border border-blue-100 rounded-3xl shadow-2xl shadow-blue-200/60 p-6 max-w-md w-full">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center text-2xl">✨</div>
+                <div>
+                  <h2 className="text-2xl font-semibold text-gray-900">Ready for the real thing?</h2>
+                  <p className="text-sm text-gray-500">Sign in to keep the chat going with your own lecturers, rubrics, and course packs.</p>
+                </div>
+              </div>
+              <p className="text-sm text-gray-600 mb-6">
+                The public preview gives you three prompts. Unlock unlimited chats, uploads, and course selection by logging in or creating an account.
+              </p>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <button
+                  onClick={() => navigate('/login')}
+                  className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-500 font-semibold transition"
+                >
+                  Log in to continue
+                </button>
+                <button
+                  onClick={() => navigate('/signup')}
+                  className="flex-1 px-4 py-2.5 border border-blue-200 text-blue-700 rounded-xl font-semibold hover:bg-blue-50 transition"
+                >
+                  Create account
+                </button>
+              </div>
+              <button
+                onClick={() => setShowPublicLimitModal(false)}
+                className="mt-4 w-full text-sm text-gray-500 hover:text-gray-700"
+              >
+                Maybe later
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

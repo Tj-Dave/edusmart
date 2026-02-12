@@ -1,0 +1,339 @@
+// src/services/api.ts
+import { User, TokenResponse } from '../types/auth';
+import { SetupStatus } from '../types/institution';
+
+const API_BASE_URL = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000';
+
+// ==================== Setup Endpoints ====================
+export const setupApi = {
+  checkStatus: async (): Promise<SetupStatus> => {
+    const response = await fetch(`${API_BASE_URL}/setup/status`);
+    if (!response.ok) throw new Error('Failed to check setup status');
+    return response.json();
+  },
+
+  configure: async (config: {
+    institution_name: string;
+    institution_code: string;
+    student_email_pattern: string;
+    lecturer_email_pattern: string;
+    admin_email: string;
+    admin_password: string;
+    admin_full_name: string;
+    campuses?: string[];
+    faculties?: string[];
+    departments?: Record<string, string[]>;
+    academic_years?: string[];
+    semesters?: string[];
+    course_catalog?: Array<{ code: string; name: string; department: string }>;
+  }) => {
+    const response = await fetch(`${API_BASE_URL}/setup/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Setup failed');
+    }
+    return response.json();
+  },
+};
+
+// ==================== Auth Endpoints ====================
+export const authApi = {
+  login: async (email: string, password: string): Promise<TokenResponse> => {
+    const response = await fetch(`${API_BASE_URL}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Login failed');
+    }
+    return response.json();
+  },
+
+  register: async (
+    email: string,
+    password: string,
+    profileData?: {
+      username?: string;
+      full_name?: string;
+      university_id?: string;
+      faculty?: string;
+      department?: string;
+      program?: string;
+      year_of_study?: number;
+      phone?: string;
+    }
+  ) => {
+    const body = {
+      email,
+      password,
+      ...profileData,
+    };
+    const response = await fetch(`${API_BASE_URL}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Registration failed');
+    }
+    return response.json();
+  },
+
+  getMe: async (token: string): Promise<User> => {
+    const response = await fetch(`${API_BASE_URL}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Failed to fetch user');
+    return response.json();
+  },
+
+  setPassword: async (token: string, password: string, passwordConfirm: string) => {
+    const response = await fetch(`${API_BASE_URL}/auth/set-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ password, password_confirm: passwordConfirm }),
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Password update failed');
+    }
+    return response.json();
+  },
+};
+
+// ==================== Admin Endpoints ====================
+export const adminApi = {
+  getUsers: async (token: string) => {
+    const response = await fetch(`${API_BASE_URL}/admin/users`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Failed to fetch users');
+    return response.json();
+  },
+
+  createUser: async (token: string, userId: string, userData: {
+    email: string;
+    full_name: string;
+    role: 'student' | 'lecturer';
+    password: string;
+    username?: string;
+    phone?: string;
+    university_id?: string;
+    department?: string;
+    faculty?: string;
+    program?: string;
+    year_of_study?: number;
+    courses?: string;
+  }) => {
+    const response = await fetch(`${API_BASE_URL}/admin/users`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'X-User-Id': userId,
+      },
+      body: JSON.stringify(userData),
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to create user');
+    }
+    return response.json();
+  },
+
+  getAnalytics: async (token: string) => {
+    const response = await fetch(`${API_BASE_URL}/admin/analytics`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Failed to fetch analytics');
+    return response.json();
+  },
+};
+
+// ==================== Chat Endpoints ====================
+export const chatApi = {
+  createSession: async (token: string, courseCode?: string, title?: string) => {
+    const response = await fetch(`${API_BASE_URL}/chats`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ course_code: courseCode, title }),
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to create chat session');
+    }
+    return response.json();
+  },
+
+  listSessions: async (token: string, includeArchived?: boolean) => {
+    const params = new URLSearchParams();
+    if (includeArchived) params.append('include_archived', 'true');
+    const response = await fetch(`${API_BASE_URL}/chats?${params}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Failed to fetch chat sessions');
+    return response.json();
+  },
+
+  sendMessage: async (token: string, sessionId: string, content: string) => {
+    const params = new URLSearchParams({ content });
+    const response = await fetch(`${API_BASE_URL}/chats/${sessionId}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Bearer ${token}`,
+      },
+      body: params,
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to send message');
+    }
+    return response.json();
+  },
+};
+
+// ==================== Ingestion Endpoints ====================
+export const ingestionApi = {
+  uploadDocument: async (token: string, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE_URL}/ingest/upload`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    if (!response.ok) {
+      let errorDetail = 'Reference upload failed';
+      try {
+        const error = await response.json();
+        if (error?.detail) errorDetail = error.detail;
+      } catch (error) {
+        // Swallow JSON parse errors and fall back to default message
+      }
+      throw new Error(errorDetail);
+    }
+
+    return response.json();
+  },
+};
+// ==================== Lecturer Endpoints ====================
+export const lecturerApi = {
+  getProfile: async (token: string) => {
+    const response = await fetch(`${API_BASE_URL}/lecturers/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Failed to fetch lecturer profile');
+    return response.json();
+  },
+
+  uploadMaterials: async (
+    token: string,
+    courseCode: string,
+    semester: string,
+    academicYear: string,
+    files: File[],
+    description?: string
+  ) => {
+    const formData = new FormData();
+    formData.append('course_code', courseCode);
+    formData.append('semester', semester);
+    formData.append('academic_year', academicYear);
+    if (description) formData.append('description', description);
+    files.forEach(file => formData.append('files', file));
+
+    const response = await fetch(`${API_BASE_URL}/lecturers/upload`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: formData,
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Upload failed');
+    }
+    return response.json();
+  },
+
+  getUploads: async (token: string, courseCode?: string) => {
+    const params = new URLSearchParams();
+    if (courseCode) params.append('course_code', courseCode);
+    const response = await fetch(`${API_BASE_URL}/lecturers/uploads?${params}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Failed to fetch uploads');
+    return response.json();
+  },
+
+  getStats: async (token: string) => {
+    const response = await fetch(`${API_BASE_URL}/lecturers/stats`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Failed to fetch upload stats');
+    return response.json();
+  },
+
+  getAnalytics: async (token: string) => {
+    const response = await fetch(`${API_BASE_URL}/lecturers/analytics`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error('Failed to fetch analytics');
+    return response.json();
+  },
+};
+
+// ==================== Institution Configuration Endpoints ====================
+export const institutionApi = {
+  getConfiguration: async (token?: string) => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    const response = await fetch(`${API_BASE_URL}/institution/config`, {
+      headers,
+    });
+    if (!response.ok) throw new Error('Failed to fetch institution configuration');
+    return response.json();
+  },
+
+  updateConfiguration: async (config: any, token?: string) => {
+    const authToken = token || localStorage.getItem('auth_token') || '';
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    const response = await fetch(`${API_BASE_URL}/institution/config`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(config),
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to update institution configuration');
+    }
+    return response.json();
+  },
+};
