@@ -30,10 +30,16 @@ def create_chat(
     user_id: str = Depends(get_current_user_id),
 ):
     try:
-        s = crud_chats.create_chat_session(db, user_id=user_id, title=payload.title)
+        s = crud_chats.create_chat_session(
+            db,
+            user_id=user_id,
+            course_id=payload.course_id,
+            title=payload.title,
+        )
         return s
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 
 @router.get("", response_model=list[ChatSessionOut])

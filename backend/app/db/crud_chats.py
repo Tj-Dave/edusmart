@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 from app.db.models import ChatSession, ChatMessage, MessageRole, MemoryState
 
 
-def create_chat_session(db: Session, user_id, title: Optional[str] = None) -> ChatSession:
-    session = ChatSession(user_id=user_id, title=title, is_archived=False)
+def create_chat_session(db: Session, user_id, course_id: str, title: Optional[str] = None) -> ChatSession:
+    session = ChatSession(user_id=user_id, course_id=course_id, title=title, is_archived=False)
     db.add(session)
     db.commit()
     db.refresh(session)
@@ -36,6 +36,13 @@ def get_chat_session(db: Session, user_id, session_id: UUID) -> Optional[ChatSes
         .filter(ChatSession.id == session_id, ChatSession.user_id == user_id)
         .one_or_none()
     )
+
+def get_session_course_id(db: Session, user_id, session_id: UUID) -> str:
+    s = get_chat_session(db, user_id, session_id)
+    if not s:
+        raise ValueError("Chat session not found")
+    return s.course_id
+
 
 
 def rename_chat_session(db: Session, user_id, session_id: UUID, title: str) -> ChatSession:
