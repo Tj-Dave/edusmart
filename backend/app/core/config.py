@@ -72,7 +72,7 @@ class Settings(BaseSettings):
 
     FINAL_LLM_CONTEXT_SIZE: int = 4096
     FINAL_LLM_THREADS: int = 8
-    FINAL_LLM_MAX_TOKENS: int = 512
+    FINAL_LLM_MAX_TOKENS: int = 1024
     FINAL_LLM_TEMPERATURE: float = 0.7
     FINAL_LLM_TOP_P: float = 0.9
 
@@ -126,6 +126,11 @@ class Settings(BaseSettings):
 
     SECRET_KEY: str = "change_this_in_production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+
+    JWT_SECRET_KEY: str
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24h
+
 
     # =====================================================
     # Logging Configuration

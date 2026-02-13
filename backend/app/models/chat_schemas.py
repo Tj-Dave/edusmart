@@ -7,11 +7,13 @@ from pydantic import BaseModel, Field
 
 class ChatSessionCreate(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
+    course_id: str
 
 
 class ChatSessionOut(BaseModel):
     id: UUID
     title: Optional[str]
+    course_id: str
     is_archived: bool
 
     class Config:

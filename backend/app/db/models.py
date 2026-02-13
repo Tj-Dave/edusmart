@@ -168,7 +168,7 @@ class ChatSession(Base):
         nullable=False,
         index=True,
     )
-
+    course_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
@@ -242,3 +242,76 @@ class MemoryState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     session: Mapped["ChatSession"] = relationship(back_populates="memory_state")
+
+
+# -----------------------------
+# ingestion documents registry
+# -----------------------------
+class IngestionStatus(str, enum.Enum):
+    queued = "queued"
+    ingesting = "ingesting"
+    partial_success = "partial_success"
+    success = "success"
+    failed = "failed"
+
+
+class IngestedDocument(Base):
+    """
+    Registry for uploaded/ingested files.
+
+    This is the source of truth for document_id stability.
+    We dedupe by (course_id, uploader_user_id, file_hash).
+    """
+    __tablename__ = "ingested_documents"
+
+    document_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+
+    # who uploaded
+    uploader_user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # course scope (string because your course table isn't shown yet)
+    course_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+
+    # file identity
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # sha256 hex
+    size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    mime_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # optional storage pointer (local path / s3 key / etc)
+    storage_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # ingestion status
+    status: Mapped[IngestionStatus] = mapped_column(
+        SAEnum(IngestionStatus, name="ingestion_status"),
+        nullable=False,
+        server_default="queued",
+        index=True,
+    )
+
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # useful counters
+    total_chunks: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    stored_vectors: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    processed_images: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    ocr_pending: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    ocr_ingested_chunks: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    uploader: Mapped["User"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("course_id", "uploader_user_id", "file_hash", name="uq_ingested_doc_course_uploader_hash"),
+    )

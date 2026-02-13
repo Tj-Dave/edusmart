@@ -40,19 +40,26 @@ def _format_memory_block(ctx_pack: dict) -> str:
 
 
 async def run_ai_pipeline(
+    *,
     user_query: str,
     req: Request,
     db: Session,
     user_id: str,
     session_id: UUID,
-):
+) -> QueryResponse:
     bloom_detector = req.app.state.bloom_detector
     competency_mapper = req.app.state.competency_mapper
     rag_engine = req.app.state.rag_engine
     llm_client = req.app.state.llm_client
     memory_manager = getattr(req.app.state, "memory_manager", None)
 
-    # 0) Store user message in Postgres chat_messages
+    # 0) Ensure session exists + belongs to user and fetch course_id (server-trusted)
+    try:
+        course_id = crud_chats.get_session_course_id(db, user_id=user_id, session_id=session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # 1) Store user message
     try:
         crud_chats.append_message(
             db,
@@ -62,25 +69,22 @@ async def run_ai_pipeline(
             content=user_query,
         )
     except ValueError as e:
-        # chat session doesn't exist or doesn't belong to user
         raise HTTPException(status_code=404, detail=str(e))
 
-    # 0.1) Memory (optional): keep your existing MemoryManager if it's available
+    # 2) Memory block (optional)
     memory_block = ""
     if memory_manager is not None:
         ctx_pack = memory_manager.build_context_pack(db, user_id, session_id, user_query)
         memory_block = _format_memory_block(ctx_pack)
 
-    # 1) Bloom
+    # 3) Bloom + Competency
     bloom_level = bloom_detector.detect(user_query)
-
-    # 2) Competency mapping
     competency = competency_mapper.map(user_query)
 
-    # 3) RAG retrieve
-    context_chunks = rag_engine.retrieve(user_query)
+    # 4) RAG retrieve (course-scoped)
+    context_chunks = rag_engine.retrieve(user_query, course_id=course_id)
 
-    # 4) Build prompt (includes memory)
+    # 5) Build prompt
     final_prompt = PromptEngine.build_prompt(
         query=user_query,
         bloom_level=bloom_level,
@@ -89,10 +93,10 @@ async def run_ai_pipeline(
         memory=memory_block,
     )
 
-    # 5) Generate answer
+    # 6) Generate answer
     response_text = await run_in_threadpool(llm_client.generate, final_prompt)
 
-    # 6) Store assistant message in Postgres chat_messages
+    # 7) Store assistant message
     crud_chats.append_message(
         db,
         user_id=user_id,
@@ -101,7 +105,7 @@ async def run_ai_pipeline(
         content=response_text,
     )
 
-    # 6.1) Store assistant in MemoryManager too (optional)
+    # 8) Summarize memory (optional)
     if memory_manager is not None:
         memory_manager.maybe_summarize(db, user_id, session_id)
 
@@ -110,6 +114,7 @@ async def run_ai_pipeline(
         bloom_level=bloom_level,
         prompt=final_prompt,
         response=response_text,
+        course_id=course_id,
     )
 
 

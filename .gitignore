@@ -75,3 +75,4 @@ Thumbs.db
 
 frontend/electron/dist/
 frontend/electron/node_modules/
+frontend/react-app/node_modules/

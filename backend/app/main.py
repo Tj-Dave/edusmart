@@ -17,7 +17,6 @@ from app.db.vector_store import VectorStore
 from app.services.memory.memory_manager import MemoryManagerPG
 
 from app.routes.ai_query import router as ai_query_router
-
 from app.routes.chats import router as chats_router
 from app.routes.auth_demo import router as auth_router
 
@@ -55,7 +54,6 @@ app.state.rag_engine = rag_engine
 app.state.memory_manager = memory_manager
 
 app.include_router(ai_query_router)
-
 app.include_router(auth_router)
 app.include_router(chats_router)
 
