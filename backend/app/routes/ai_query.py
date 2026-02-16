@@ -9,10 +9,10 @@ from app.services.prompt_engine import PromptEngine
 
 from app.db.postgres import get_db
 from app.db import crud_chats
-from app.db.models import MessageRole
-from app.routes._dev_auth_dependency import get_current_user_id  # uses X-User-Id header (dev)
+from app.db.models import MessageRole, User
+from app.services.auth.deps import get_current_user
 
-router = APIRouter()
+router = APIRouter(prefix="/ai-query", tags=["ai"])
 
 
 def _format_memory_block(ctx_pack: dict) -> str:
@@ -53,13 +53,15 @@ async def run_ai_pipeline(
     llm_client = req.app.state.llm_client
     memory_manager = getattr(req.app.state, "memory_manager", None)
 
-    # 0) Ensure session exists + belongs to user and fetch course_id (server-trusted)
+    # 0) session must exist + belong to user; fetch course_id (server-trusted)
     try:
         course_id = crud_chats.get_session_course_id(db, user_id=user_id, session_id=session_id)
+        if course_id is None:
+            course_id = ""  # fallback to empty course context if not found
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    # 1) Store user message
+    # 1) store user message
     try:
         crud_chats.append_message(
             db,
@@ -71,20 +73,20 @@ async def run_ai_pipeline(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    # 2) Memory block (optional)
+    # 2) memory block (optional)
     memory_block = ""
     if memory_manager is not None:
         ctx_pack = memory_manager.build_context_pack(db, user_id, session_id, user_query)
         memory_block = _format_memory_block(ctx_pack)
 
-    # 3) Bloom + Competency
+    # 3) bloom + competency
     bloom_level = bloom_detector.detect(user_query)
     competency = competency_mapper.map(user_query)
 
-    # 4) RAG retrieve (course-scoped)
+    # 4) rag retrieve (course-scoped)
     context_chunks = rag_engine.retrieve(user_query, course_id=course_id)
 
-    # 5) Build prompt
+    # 5) build prompt
     final_prompt = PromptEngine.build_prompt(
         query=user_query,
         bloom_level=bloom_level,
@@ -93,10 +95,10 @@ async def run_ai_pipeline(
         memory=memory_block,
     )
 
-    # 6) Generate answer
+    # 6) generate
     response_text = await run_in_threadpool(llm_client.generate, final_prompt)
 
-    # 7) Store assistant message
+    # 7) store assistant message
     crud_chats.append_message(
         db,
         user_id=user_id,
@@ -105,7 +107,7 @@ async def run_ai_pipeline(
         content=response_text,
     )
 
-    # 8) Summarize memory (optional)
+    # 8) summarize memory (optional)
     if memory_manager is not None:
         memory_manager.maybe_summarize(db, user_id, session_id)
 
@@ -123,8 +125,9 @@ async def ai_query(
     request: QueryRequest,
     req: Request,
     db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id),
+    current_user: User = Depends(get_current_user),
 ):
+    user_id = str(current_user.id)
     try:
         return await run_ai_pipeline(
             user_query=request.query,
@@ -145,8 +148,9 @@ async def ai_query_browser(
     session_id: UUID = Query(...),
     req: Request = None,
     db: Session = Depends(get_db),
-    user_id: str = Depends(get_current_user_id),
+    current_user: User = Depends(get_current_user),
 ):
+    user_id = str(current_user.id)
     try:
         return await run_ai_pipeline(
             user_query=query,

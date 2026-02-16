@@ -10,6 +10,7 @@ class RAGEngine:
         self.embedder = embedder
 
     def retrieve(self, query: str, *, course_id: str, n_results: int = 5):
+        course_id = course_id.strip() or "documents"
         collection = self.vector_store.course_collection_name(course_id)
         qvec = self.embedder.embed_query(query)
         results = self.vector_store.query_embeddings(

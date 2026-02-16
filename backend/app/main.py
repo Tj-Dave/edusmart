@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.db.postgres import engine
 
-from app.core.config import settings
 from app.services.llm.llama_cpp_client import LLMClient
 from app.services.llm.llama_cpp_subclient import LLMSubclient
 from app.services.multiQuery import MultiQuery
@@ -18,9 +18,22 @@ from app.services.memory.memory_manager import MemoryManagerPG
 
 from app.routes.ai_query import router as ai_query_router
 from app.routes.chats import router as chats_router
-from app.routes.auth_demo import router as auth_router
+from app.routes.auth import router as auth_router
+from app.routes.ingestion import router as ingestion_router  # ✅ add
 
 app = FastAPI(title="EduSmart Backend")
+
+# ✅ CORS for Vite frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Initialize once at startup
 llm_client = LLMClient()
@@ -30,8 +43,8 @@ multi_query_service = MultiQuery(llm_subclient)
 vector_store = VectorStore()
 embedder = E5Embedder(device="cpu")
 competency_mapper = CompetencyMapper(embedder)
-bloom_detector = BloomDetector()          # if this loads a model, keep it here too
-rag_engine = RAGEngine(vector_store=vector_store, embedder=embedder)                  # you’ll later inject embedder into this too
+bloom_detector = BloomDetector()
+rag_engine = RAGEngine(vector_store=vector_store, embedder=embedder)
 
 memory_manager = MemoryManagerPG(
     vector_store=vector_store,
@@ -53,9 +66,11 @@ app.state.bloom_detector = bloom_detector
 app.state.rag_engine = rag_engine
 app.state.memory_manager = memory_manager
 
-app.include_router(ai_query_router)
+# Routers
 app.include_router(auth_router)
 app.include_router(chats_router)
+app.include_router(ai_query_router)
+app.include_router(ingestion_router)
 
 @app.get("/health")
 def health():

@@ -161,22 +161,48 @@ export const adminApi = {
 };
 
 // ==================== Chat Endpoints ====================
+// services/api.ts (or wherever chatApi lives)
+
+const safeParseError = async (response: Response) => {
+  const text = await response.text();
+  try {
+    const json = JSON.parse(text);
+    return json?.detail || json?.message || text || response.statusText;
+  } catch {
+    return text || response.statusText;
+  }
+};
+
 export const chatApi = {
-  createSession: async (token: string, courseCode?: string, title?: string) => {
-    const response = await fetch(`${API_BASE_URL}/chats`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ course_code: courseCode, title }),
-    });
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || 'Failed to create chat session');
-    }
-    return response.json();
-  },
+  // ✅ NEW: Atomic first-message endpoint
+    queryAtomic: async (
+      token: string,
+      content: string,
+      courseCode?: string | null,
+      limit: number = 200
+    ) => {
+      const payload = {
+        content,
+        course_code: courseCode && courseCode.trim().length > 0 ? courseCode.trim() : null,
+        limit,
+      };
+
+      const response = await fetch(`${API_BASE_URL}/chats/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.detail || "Failed to run chat query");
+      }
+
+      return response.json();
+    },
 
   listSessions: async (token: string, includeArchived?: boolean) => {
     const params = new URLSearchParams();
@@ -184,7 +210,17 @@ export const chatApi = {
     const response = await fetch(`${API_BASE_URL}/chats?${params}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!response.ok) throw new Error('Failed to fetch chat sessions');
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  // ✅ NEW: fetch a session + its messages
+  getSessionDetail: async (token: string, sessionId: string, limit: number = 200) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    const response = await fetch(`${API_BASE_URL}/chats/${sessionId}?${params}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
     return response.json();
   },
 
@@ -198,13 +234,11 @@ export const chatApi = {
       },
       body: params,
     });
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || 'Failed to send message');
-    }
+    if (!response.ok) throw new Error(await safeParseError(response));
     return response.json();
   },
 };
+
 
 // ==================== Ingestion Endpoints ====================
 export const ingestionApi = {

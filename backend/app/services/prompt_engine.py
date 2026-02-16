@@ -31,6 +31,8 @@ Provide a clear, pedagogically sound response that:
 • Connects learning to real-world applications
 • Encourages critical thinking and problem-solving
 
+Do not Justify your response and how it links to the bloom level and competencies. Focus on providing a helpful, student-friendly answer that fosters learning and curiosity.
+
 Response:"""
     
     @staticmethod

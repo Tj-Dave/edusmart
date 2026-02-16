@@ -168,7 +168,7 @@ class ChatSession(Base):
         nullable=False,
         index=True,
     )
-    course_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    course_id: Mapped[str] = mapped_column(Text, nullable=True, index=True)
     title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 

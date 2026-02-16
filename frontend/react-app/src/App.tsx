@@ -32,7 +32,7 @@ function HomeRouter() {
     } else if (user.role === 'lecturer') {
       navigate('/upload', { replace: true });
     } else {
-      navigate('/course-selection', { replace: true });
+      navigate('/chat', { replace: true });
     }
   }, [user, navigate]);
 
@@ -62,7 +62,7 @@ function AppRouter() {
         <Route path="/admin/users" element={<AdminUsersPage />} />
         <Route path="/admin/dashboard" element={<AdminDashboard />} />
         <Route path="/" element={<HomeRouter />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/chat" replace />} />
       </Routes>
     </BrowserRouter>
   );

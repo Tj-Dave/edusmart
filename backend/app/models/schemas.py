@@ -1,7 +1,6 @@
 from pydantic import BaseModel
 from uuid import UUID
 
-
 class QueryRequest(BaseModel):
     session_id: UUID
     query: str

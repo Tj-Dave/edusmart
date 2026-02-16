@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useCourseStore } from '../state/courseStore';
 import { useAuth } from '../state/AuthContext';
 import { chatApi, ingestionApi } from '../services/api';
+import MarkdownMessage from "../components/markdownMessage";
 
 interface Citation {
   id?: string;
@@ -47,6 +48,8 @@ const PUBLIC_PREVIEW_COURSE = {
   name: 'EduSmart Demo Course',
 };
 
+const NO_COURSE_LABEL = "General Chat (No course context)";
+
 const DEFAULT_CHAT_TITLE = 'Chat name';
 
 const DEMO_AUTH_TOKEN = ((import.meta.env.VITE_DEMO_AUTH_TOKEN as string) || '').trim();
@@ -67,11 +70,6 @@ const DEMO_REFERENCE_CITATIONS: Citation[] = [
     role: 'lecturer',
   },
 ];
-
-const deriveSessionId = (payload: Partial<ChatSession> & { id?: string | number; session_id?: string | number; chat_id?: string | number }) => {
-  if (!payload) return undefined;
-  return payload.id?.toString() || payload.session_id?.toString() || payload.chat_id?.toString();
-};
 
 const buildLocalDemoAssistantReply = (prompt: string): Message => {
   const sanitizedPrompt = prompt.replace(/\s+/g, ' ').trim();
@@ -95,7 +93,6 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   const { courseCode, courseName } = useCourseStore();
   const { user, logout } = useAuth();
   const isPublicPreview = publicMode;
-  const activeCourseCode = isPublicPreview ? PUBLIC_PREVIEW_COURSE.code : courseCode;
   const activeCourseName = isPublicPreview
     ? PUBLIC_PREVIEW_COURSE.name
     : courseName || courseCode || PUBLIC_PREVIEW_COURSE.name;
@@ -104,7 +101,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isFetchingSession, setIsFetchingSession] = useState(true);
+  const [isFetchingSession, setIsFetchingSession] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => (typeof window !== 'undefined' ? window.innerWidth >= 1024 : true));
   const [showSwitchCourseConfirm, setShowSwitchCourseConfirm] = useState(false);
@@ -157,17 +154,13 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     return trimmed.length > 40 ? `${trimmed.slice(0, 40).trim()}…` : trimmed;
   };
 
-  // Initialize chat session on mount
+  // ==================== Load sessions on mount (NO POST on page load) ====================
   useEffect(() => {
-    if (!isPublicPreview && !courseCode) {
-      navigate('/course-selection');
-      return;
-    }
-
+    // Demo-local still can create a local-only session
     if (useLocalDemo) {
       const timestamp = new Date();
       const chatId = `demo-local-${Date.now()}`;
-      setIsFetchingSession(true);
+
       setCurrentSession({
         id: chatId,
         course_code: PUBLIC_PREVIEW_COURSE.code,
@@ -175,85 +168,67 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
         created_at: timestamp.toISOString(),
         message_count: 0,
       });
-      setChatHistory([
-        {
-          session_id: chatId,
-          title: DEFAULT_CHAT_TITLE,
-          created_at: timestamp.toISOString(),
-        },
-      ]);
+
+      setChatHistory([{ session_id: chatId, title: DEFAULT_CHAT_TITLE, created_at: timestamp.toISOString() }]);
       setMessages([]);
       setCurrentChatTitle(DEFAULT_CHAT_TITLE);
       setError(null);
-      setIsFetchingSession(false);
       return;
     }
 
-    const initializeChat = async () => {
+    // Public preview: no session creation here
+    if (isPublicPreview) {
+      setCurrentSession(null);
+      setMessages([]);
+      setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+      return;
+    }
+
+    // Real mode: just list sessions for sidebar (DB-only)
+    const load = async () => {
       try {
         setIsFetchingSession(true);
-        const timestamp = new Date();
-        const sessionCourseCode = activeCourseCode || PUBLIC_PREVIEW_COURSE.code;
-        const sessionCourseName = activeCourseName || sessionCourseCode;
+        setError(null);
 
-        if (isPublicPreview) {
-          if (!authToken) {
-            setError('Demo chat token missing. Please refresh.');
-            return;
-          }
-          const createdSession = await chatApi.createSession(authToken, sessionCourseCode, 'Demo Course Preview');
-          const sessionId = deriveSessionId(createdSession) || `demo-${Date.now()}`;
-          const createdAt = createdSession?.created_at || timestamp.toISOString();
-          setCurrentSession({
-            id: sessionId,
-            course_code: createdSession?.course_code || sessionCourseCode,
-            course_name: createdSession?.course_name || sessionCourseName,
-            created_at: createdAt,
-            message_count: 0,
-          });
-          setChatHistory([
-            {
-              session_id: sessionId,
-              title: DEFAULT_CHAT_TITLE,
-              created_at: createdAt,
-            },
-          ]);
-          setMessages([]);
-          setCurrentChatTitle(DEFAULT_CHAT_TITLE);
-          setError(null);
+        if (!token) {
+          setError("Your session expired. Please log in again.");
           return;
         }
 
-        const chatId = `local-${Date.now()}`;
-        setCurrentSession({
-          id: chatId,
-          course_code: courseCode!,
-          course_name: courseName || courseCode!,
-          created_at: timestamp.toISOString(),
-          message_count: 0,
-        });
+        const sessions = await chatApi.listSessions(token, false);
 
-        setChatHistory([
-          {
-            session_id: chatId,
-            title: DEFAULT_CHAT_TITLE,
-            created_at: timestamp.toISOString(),
-          },
-        ]);
+        const normalized: ChatHistory[] = (sessions || [])
+          .map((s: any) => ({
+            session_id: (s?.id || s?.session_id || s?.chat_id).toString(),
+            title: s?.title || DEFAULT_CHAT_TITLE,
+            created_at: s?.created_at || new Date().toISOString(),
+            message_preview: s?.message_preview || undefined,
+          }))
+          .sort((a: ChatHistory, b: ChatHistory) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
+        setChatHistory(normalized);
+
+        // ✅ Do NOT auto-select any chat unless you want it.
+        // If you want auto-load the latest chat, uncomment:
+        // if (normalized.length > 0) await handleSelectChat(normalized[0].session_id);
+
+        // Default to draft mode on load:
+        setCurrentSession(null);
         setMessages([]);
         setCurrentChatTitle(DEFAULT_CHAT_TITLE);
-        setError(null);
       } catch (err: any) {
-        console.error('Failed to initialize chat:', err);
-        setError('Failed to initialize chat. Please try again.');
+        console.error("Failed to load chat sessions:", err);
+        setError(err?.message || "Failed to load chats.");
       } finally {
         setIsFetchingSession(false);
       }
     };
 
-    initializeChat();
-  }, [token, courseCode, courseName, navigate, isPublicPreview, activeCourseCode, activeCourseName, authToken, useLocalDemo]);
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -272,9 +247,9 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   }, []);
 
   // ==================== HANDLERS ====================
-  
+
   const sendMessage = async () => {
-    if (!inputValue.trim() || !currentSession?.id || isLoading) return;
+    if (!inputValue.trim() || isLoading) return;
 
     if (isPublicPreview && publicQueryCount >= 3) {
       setShowPublicLimitModal(true);
@@ -283,94 +258,136 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     }
 
     const trimmedMessage = inputValue.trim();
-    const isFirstMessage = messages.length === 0;
 
+    // optimistic UI
     const userMessage: Message = {
-      role: 'user',
+      role: "user",
       content: trimmedMessage,
       timestamp: new Date().toISOString(),
     };
 
     setMessages(prev => [...prev, userMessage]);
-    setInputValue('');
+    setInputValue("");
     setShowComposerExtras(false);
     setIsLoading(true);
     setError(null);
 
     try {
+      // Demo-local flow unchanged
       if (useLocalDemo) {
         const aiMessage = buildLocalDemoAssistantReply(trimmedMessage);
         setMessages(prev => [...prev, aiMessage]);
 
-        if (isFirstMessage) {
+        // set title on first message (local)
+        if ((messages?.length || 0) === 0) {
           const chatTitle = deriveChatTitle(trimmedMessage);
           setChatHistory(prev =>
             prev.map(chat =>
-              chat.session_id === currentSession.id
-                ? { ...chat, title: chatTitle }
-                : chat
+              chat.session_id === currentSession?.id ? { ...chat, title: chatTitle } : chat
             )
           );
           setCurrentChatTitle(chatTitle);
         }
 
-        setCurrentSession(prev =>
-          prev ? { ...prev, message_count: prev.message_count + 2 } : null
-        );
-        if (isPublicPreview) {
-          bumpPublicUsage();
-        }
+        setCurrentSession(prev => (prev ? { ...prev, message_count: prev.message_count + 2 } : prev));
+        if (isPublicPreview) bumpPublicUsage();
         return;
       }
 
+      // Auth check
       if (!authToken) {
-        setError('Your session expired. Please log in again.');
+        setError("Your session expired. Please log in again.");
         return;
       }
 
-      const response = await chatApi.sendMessage(authToken, currentSession.id, userMessage.content);
+      // ✅ If NO active session => use atomic query endpoint (creates session + stores msgs)
+      if (!currentSession?.id) {
+        const detail = await chatApi.queryAtomic(
+          authToken,
+          trimmedMessage,
+          courseCode?.trim() || null,
+          500
+        );
+
+        const session = detail?.session;
+        const msgs = Array.isArray(detail?.messages) ? detail.messages : [];
+
+        const normalizedMessages: Message[] = msgs.map((m: any) => ({
+          id: typeof m?.id === "number" ? m.id : undefined,
+          role: m?.role === "assistant" ? "assistant" : "user",
+          content: typeof m?.content === "string" ? m.content : "",
+          timestamp: m?.created_at ? new Date(m.created_at).toISOString() : undefined,
+        }));
+
+        const sessionId = (session?.id || session?.session_id)?.toString();
+        if (!sessionId) throw new Error("Backend did not return session id.");
+
+        const normalizedSession: ChatSession = {
+          id: sessionId,
+          course_code: session?.course_id || "",
+          course_name: (session?.course_id || "").trim()
+            ? (courseName || session?.course_id)
+            : NO_COURSE_LABEL,
+          created_at: session?.created_at || new Date().toISOString(),
+          message_count: typeof session?.message_count === "number"
+            ? session.message_count
+            : normalizedMessages.length,
+        };
+
+        setCurrentSession(normalizedSession);
+        setMessages(normalizedMessages);
+
+        const resolvedTitle = session?.title || deriveChatTitle(trimmedMessage);
+        setCurrentChatTitle(resolvedTitle);
+
+        // Sidebar: DB-only list, but we can refresh + ensure it appears instantly
+        setChatHistory(prev => {
+          const filtered = prev.filter(c => c.session_id !== sessionId);
+          return [{ session_id: sessionId, title: resolvedTitle, created_at: normalizedSession.created_at }, ...filtered];
+        });
+
+        // Optional: refresh from backend to guarantee DB truth
+        // await refreshSessions();
+
+        return;
+      }
+
+      // ✅ If session exists, you can keep using /chats/{id}/messages
+      const response = await chatApi.sendMessage(authToken, currentSession.id, trimmedMessage);
 
       const rawCitations = Array.isArray(response?.citations)
         ? response.citations
         : Array.isArray(response?.references)
         ? response.references
         : [];
+
       const lecturerCitations = rawCitations
-        .filter((citation: any) => getCitationRole(citation) === 'lecturer')
+        .filter((citation: any) => getCitationRole(citation) === "lecturer")
         .map(mapCitation);
+
       const hiddenCitationCount = rawCitations.length - lecturerCitations.length;
 
       const aiMessage: Message = {
         id: response.message_id,
-        role: 'assistant',
-        content: response.response || 'I apologize, but I could not generate a response. Please try again.',
+        role: "assistant",
+        content: response.response || "I apologize, but I could not generate a response. Please try again.",
         timestamp: new Date().toISOString(),
         citations: lecturerCitations,
         hiddenCitationCount: hiddenCitationCount > 0 ? hiddenCitationCount : undefined,
       };
+
       setMessages(prev => [...prev, aiMessage]);
 
-      if (isFirstMessage) {
-        const chatTitle = deriveChatTitle(trimmedMessage);
-        setChatHistory(prev =>
-          prev.map(chat =>
-            chat.session_id === currentSession.id
-              ? { ...chat, title: chatTitle }
-              : chat
-          )
-        );
-        setCurrentChatTitle(chatTitle);
-      }
-
       setCurrentSession(prev =>
-        prev ? { ...prev, message_count: prev.message_count + 2 } : null
+        prev ? { ...prev, message_count: prev.message_count + 2 } : prev
       );
-      if (isPublicPreview) {
-        bumpPublicUsage();
-      }
+
+      if (isPublicPreview) bumpPublicUsage();
     } catch (err: any) {
-      console.error('Failed to send message:', err);
-      setError('Failed to send message. Please try again.');
+      console.error("Failed to send message:", err);
+      setError(err?.message || "Failed to send message. Please try again.");
+
+      // rollback optimistic user msg
       setMessages(prev => prev.slice(0, -1));
       setInputValue(trimmedMessage);
     } finally {
@@ -440,18 +457,30 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     }
   };
 
+  const refreshSessions = async (): Promise<ChatHistory[]> => {
+    const sessions = await chatApi.listSessions(token, false);
+    const normalized: ChatHistory[] = (sessions || []).map((s: any) => ({
+      session_id: (s?.id || s?.session_id || s?.chat_id).toString(),
+      title: s?.title || DEFAULT_CHAT_TITLE,
+      created_at: s?.created_at || new Date().toISOString(),
+      message_preview: s?.message_preview || undefined,
+    }));
+
+    setChatHistory(normalized);
+    return normalized;
+  };
+
   const handleNewChat = async () => {
+    // Demo-local keeps its behavior (optional)
     if (useLocalDemo) {
       const timestamp = new Date();
       const chatId = `demo-local-${Date.now()}`;
+
       setChatHistory(prev => [
-        {
-          session_id: chatId,
-          title: DEFAULT_CHAT_TITLE,
-          created_at: timestamp.toISOString(),
-        },
+        { session_id: chatId, title: DEFAULT_CHAT_TITLE, created_at: timestamp.toISOString() },
         ...prev,
       ]);
+
       setCurrentSession({
         id: chatId,
         course_code: PUBLIC_PREVIEW_COURSE.code,
@@ -459,6 +488,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
         created_at: timestamp.toISOString(),
         message_count: 0,
       });
+
       setMessages([]);
       setCurrentChatTitle(DEFAULT_CHAT_TITLE);
       setError(null);
@@ -467,98 +497,88 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
       return;
     }
 
+    // Public preview: just clear to draft mode
     if (isPublicPreview) {
-      if (!authToken) {
-        setError('Demo chat token missing. Please refresh the page.');
-        return;
-      }
-      try {
-        setIsLoading(true);
-        const timestamp = new Date();
-        const createdSession = await chatApi.createSession(authToken, PUBLIC_PREVIEW_COURSE.code, 'Demo chat');
-        const sessionId = deriveSessionId(createdSession) || `demo-${Date.now()}`;
-        const createdAt = createdSession?.created_at || timestamp.toISOString();
-        const normalizedSession: ChatSession = {
-          id: sessionId,
-          course_code: createdSession?.course_code || PUBLIC_PREVIEW_COURSE.code,
-          course_name: createdSession?.course_name || PUBLIC_PREVIEW_COURSE.name,
-          created_at: createdAt,
-          message_count: 0,
-        };
-        setCurrentSession(normalizedSession);
-        setChatHistory([
-          {
-            session_id: sessionId,
-            title: DEFAULT_CHAT_TITLE,
-            created_at: createdAt,
-          },
-        ]);
-        setMessages([]);
-        setError(null);
-        setPublicQueryCount(0);
-        setShowPublicLimitModal(false);
-        setCurrentChatTitle(DEFAULT_CHAT_TITLE);
-      } catch (err) {
-        console.error('Failed to start demo chat session:', err);
-        setError('Unable to start a new demo chat right now. Please try again shortly.');
-      } finally {
-        setIsLoading(false);
-      }
+      setCurrentSession(null);
+      setMessages([]);
+      setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+      setError(null);
+      setPublicQueryCount(0);
+      setShowPublicLimitModal(false);
       return;
     }
 
-    // Create local chat entry (no backend call)
-    const timestamp = new Date();
-    const chatId = `local-${Date.now()}`;
-    
-    setChatHistory(prev => [
-      {
-        session_id: chatId,
-        title: DEFAULT_CHAT_TITLE,
-        created_at: timestamp.toISOString(),
-      },
-      ...prev,
-    ]);
-
-    // Update current session to track the new chat
-    setCurrentSession(prev =>
-      prev ? { ...prev, id: chatId, message_count: 0, created_at: timestamp.toISOString() } : null
-    );
-
-    // Clear messages
+    // ✅ Real mode: draft-only (NO session creation)
+    setCurrentSession(null);
     setMessages([]);
-    setError(null);
     setCurrentChatTitle(DEFAULT_CHAT_TITLE);
+    setError(null);
+    setOpenMenuSessionId(null);
   };
 
   const handleSelectChat = async (sessionId: string) => {
+    if (currentSession?.id === sessionId) return;
     if (isPublicPreview) return;
-    if (!courseCode) return;
-    
+
+    if (!token) {
+      setError("Your session expired. Please log in again.");
+      return;
+    }
+
     try {
       setIsLoading(true);
-      // TODO: Fetch chat history from backend
-      // const messages = await chatApi.getMessages(token, sessionId);
-      // setMessages(messages);
-      
-      // For now, just clear messages and update session
-      const selectedChat = chatHistory.find(c => c.session_id === sessionId);
-      if (selectedChat) {
-        setCurrentSession({
-          id: sessionId,
-          course_code: courseCode,
-          course_name: courseName || courseCode,
-          created_at: selectedChat.created_at,
-          message_count: 0,
-        });
-        setMessages([]);
-        setError(null);
-        setOpenMenuSessionId(null);
-        setCurrentChatTitle(selectedChat.title || DEFAULT_CHAT_TITLE);
-      }
+      setError(null);
+
+      // ✅ backend: GET /chats/{session_id}?limit=...
+      const detail = await chatApi.getSessionDetail(token, sessionId, 500);
+      console.log("chat detail payload", detail);
+      console.log("chat detail messages[0]", detail?.messages?.[0]);
+
+      const session = detail?.session;
+      const msgs = Array.isArray(detail?.messages) ? detail.messages : [];
+
+      // ✅ map backend ChatMessage -> UI Message
+      const normalizedMessages: Message[] = msgs.map((m: any) => ({
+        id: typeof m?.id === "number" ? m.id : undefined,
+        role: (m?.role === "assistant" ? "assistant" : "user"),
+        content: typeof m?.content === "string" ? m.content : "",
+        timestamp: m?.created_at ? new Date(m.created_at).toISOString() : undefined,
+        // citations are not in your ChatMessage model by default
+      }));
+
+      // ✅ normalize current session from backend response_model
+      // Your ChatSessionOut probably has: id, course_id/course_code, title, created_at, message_count
+      const normalizedSession: ChatSession = {
+        id: (session?.id || sessionId).toString(),
+        course_code: (session?.course_code || session?.course_id || ""), // depends on what ChatSessionOut exposes
+        course_name:
+          session?.course_name ||
+          (session?.course_code || session?.course_id ? (session?.course_name || session?.course_code || session?.course_id) : NO_COURSE_LABEL),
+        created_at: session?.created_at || new Date().toISOString(),
+        message_count:
+          typeof session?.message_count === "number" ? session.message_count : normalizedMessages.length,
+      };
+
+      setCurrentSession(normalizedSession);
+      setMessages(normalizedMessages);
+
+      // ✅ Update title in header + sidebar
+      // If backend includes session.title use it; otherwise keep sidebar title
+      const resolvedTitle =
+        session?.title ||
+        chatHistory.find((c) => c.session_id === sessionId)?.title ||
+        DEFAULT_CHAT_TITLE;
+
+      setCurrentChatTitle(resolvedTitle);
+
+      setChatHistory((prev) =>
+        prev.map((c) => (c.session_id === sessionId ? { ...c, title: resolvedTitle } : c))
+      );
+
+      setOpenMenuSessionId(null);
     } catch (err: any) {
-      console.error('Failed to load chat:', err);
-      setError('Failed to load chat. Please try again.');
+      console.error("Failed to load chat:", err);
+      setError(err?.message || "Failed to load chat. Please try again.");
     } finally {
       setIsLoading(false);
     }
@@ -614,21 +634,21 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     }
   };
 
-  if (!courseCode && !isPublicPreview) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-xl text-gray-700 mb-4">No course selected</p>
-          <button
-            onClick={() => navigate('/course-selection')}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
-          >
-            Select a Course
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // if (!courseCode && !isPublicPreview) {
+  //   return (
+  //     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+  //       <div className="text-center">
+  //         <p className="text-xl text-gray-700 mb-4">No course selected</p>
+  //         <button
+  //           onClick={() => navigate('/course-selection')}
+  //           className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+  //         >
+  //           Select a Course
+  //         </button>
+  //       </div>
+  //     </div>
+  //   );
+  // }
 
   if (isFetchingSession) {
     return (
@@ -644,7 +664,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 flex flex-col lg:flex-row">
+    <div className="h-screen overflow-hidden bg-gray-50 text-gray-900 flex flex-col lg:flex-row">
       {/* Sidebar */}
       <div
         className={`${
@@ -663,7 +683,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
         </div>
 
         {/* Chat History */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 overflow-hidden p-4">
             {chatHistory.length === 0 ? (
               <div className="text-center text-gray-400 text-xs py-8">
               <p>No chats yet</p>
@@ -751,7 +771,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col relative bg-gray-50">
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col relative bg-gray-50">
         {/* Header */}
         <div className="bg-white border-b border-gray-200 px-4 sm:px-8 py-4">
           <div className="flex flex-wrap items-center gap-4 justify-between">
@@ -774,10 +794,20 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
                 <p className="text-xs uppercase tracking-[0.2em] text-gray-400">Chat title</p>
                 <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 truncate">{currentChatTitle}</h1>
                 <p className="text-sm text-gray-500">
-                  {isPublicPreview ? (
-                    <span>{PUBLIC_PREVIEW_COURSE.name} • Demo context</span>
-                  ) : (
-                    <span>{activeCourseName} • {activeCourseCode}</span>
+                  {!isPublicPreview && !courseCode && (
+                    <div className="mt-2 inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      <span>⚠️</span>
+                      <span>
+                        No course context selected. Answers may be less accurate. Select a course for better results.
+                      </span>
+                      <button
+                        className="ml-2 underline font-semibold"
+                        onClick={() => navigate("/course-selection")}
+                        type="button"
+                      >
+                        Select course
+                      </button>
+                    </div>
                   )}
                 </p>
               </div>
@@ -862,7 +892,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
         </div>
 
         {/* Messages Container */}
-        <div className="flex-1 overflow-y-auto px-4 sm:px-8 py-8">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 sm:px-8 py-8">
           {messages.length === 0 ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-center max-w-lg bg-white border border-gray-200 rounded-3xl px-8 py-10 shadow-lg">
@@ -886,7 +916,8 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
                         : 'bg-white text-gray-900 rounded-3xl rounded-tl-none px-5 py-3 border border-gray-100 shadow'
                     }`}
                   >
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                    {/* <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p> */}
+                    <MarkdownMessage content={msg.content} />
                     {msg.timestamp && (
                       <p className={`text-xs mt-2 ${msg.role === 'user' ? 'text-blue-100' : 'text-gray-400'}`}>
                         {new Date(msg.timestamp).toLocaleTimeString([], {
@@ -972,7 +1003,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
                 <div className="flex items-center">
                   <button
                     type="submit"
-                    disabled={isLoading || !inputValue.trim() || !currentSession}
+                    disabled={isLoading || !inputValue.trim()}
                     className="p-2.5 rounded-2xl bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition shadow-lg shadow-blue-200"
                     title="Send"
                   >

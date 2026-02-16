@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # =====================================================
 
     LLM_BACKEND: str = "llama.cpp"         # llama.cpp
-    LLM_MODE: str = "cpu"                  # cpu | desktop | gpu
+    LLM_MODE: str = "gpu"                  # cpu | desktop | gpu
     LLAMA_CPP_BINARY: Path = BASE_DIR / "bin" / "llama-cli"
 
     # =====================================================
@@ -55,9 +55,13 @@ class Settings(BaseSettings):
 
     QUERY_LLM_CONTEXT_SIZE: int = 2048
     QUERY_LLM_THREADS: int = 8
-    QUERY_LLM_MAX_TOKENS: int = 128
+    QUERY_LLM_MAX_TOKENS: int = 512
     QUERY_LLM_TEMPERATURE: float = 0.3
     QUERY_LLM_TOP_P: float = 0.9
+
+    QUERY_LLM_N_GPU_LAYERS: int = 16
+    QUERY_LLM_N_BATCH: int = 128
+    QUERY_LLM_GPU_F16_KV: bool = True
 
     # =====================================================
     # FINAL LLM (strong) - Gemma for final inference/answering
@@ -68,13 +72,17 @@ class Settings(BaseSettings):
 
     FINAL_LLM_MODEL_CPU_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
     FINAL_LLM_MODEL_DESKTOP_PATH: Path = BASE_DIR / "models" / "gemma-3-4b-pt-q4_0.gguf"
-    FINAL_LLM_MODEL_GPU_PATH: Path = BASE_DIR / "models" / "gemma-4b.gguf"
+    FINAL_LLM_MODEL_GPU_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
 
     FINAL_LLM_CONTEXT_SIZE: int = 4096
     FINAL_LLM_THREADS: int = 8
     FINAL_LLM_MAX_TOKENS: int = 1024
     FINAL_LLM_TEMPERATURE: float = 0.7
     FINAL_LLM_TOP_P: float = 0.9
+
+    FINAL_LLM_N_GPU_LAYERS: int = 20
+    FINAL_LLM_N_BATCH: int = 256
+    FINAL_LLM_GPU_F16_KV: bool = True
 
     # =====================================================
     # Embedding Model Configuration
