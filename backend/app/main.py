@@ -20,6 +20,8 @@ from app.routes.ai_query import router as ai_query_router
 from app.routes.chats import router as chats_router
 from app.routes.auth import router as auth_router
 from app.routes.ingestion import router as ingestion_router  # ✅ add
+from app.routes.courses import router as courses_router
+from app.routes.enrollments import router as enrollments_router
 
 app = FastAPI(title="EduSmart Backend")
 
@@ -71,6 +73,8 @@ app.include_router(auth_router)
 app.include_router(chats_router)
 app.include_router(ai_query_router)
 app.include_router(ingestion_router)
+app.include_router(courses_router)
+app.include_router(enrollments_router)
 
 @app.get("/health")
 def health():

@@ -1,0 +1,175 @@
+-- ============================================================
+-- 0) Ensure pgcrypto exists (for gen_random_uuid)
+-- ============================================================
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+
+-- ============================================================
+-- 1) courses (Text PK: e.g. SWE3101)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS courses (
+  course_code        TEXT PRIMARY KEY,
+  course_name        TEXT NOT NULL,
+  description        TEXT NULL,
+  department         TEXT NULL,
+  faculty            TEXT NULL,
+  level              INTEGER NULL,
+  credits            INTEGER NULL,
+  is_active          BOOLEAN NOT NULL DEFAULT TRUE,
+
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT courses_code_not_empty CHECK (length(trim(course_code)) > 0),
+  CONSTRAINT courses_name_not_empty CHECK (length(trim(course_name)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_courses_is_active ON courses(is_active);
+
+
+-- ============================================================
+-- 2) course_offerings
+-- ============================================================
+CREATE TABLE IF NOT EXISTS course_offerings (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  course_code       TEXT NOT NULL REFERENCES courses(course_code) ON DELETE CASCADE,
+
+  term              TEXT NOT NULL,          -- e.g. "2026-S1"
+  year              INTEGER NULL,
+  cohort            TEXT NULL,
+  section           TEXT NULL,
+
+  lecturer_user_id  UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+
+  is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT course_offerings_term_not_empty CHECK (length(trim(term)) > 0)
+);
+
+-- ✅ enforce uniqueness with an expression UNIQUE INDEX (Postgres allows this)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_course_offerings_identity
+  ON course_offerings (
+    course_code,
+    term,
+    COALESCE(cohort, ''),
+    COALESCE(section, '')
+  );
+
+CREATE INDEX IF NOT EXISTS idx_course_offerings_course_code ON course_offerings(course_code);
+CREATE INDEX IF NOT EXISTS idx_course_offerings_term ON course_offerings(term);
+CREATE INDEX IF NOT EXISTS idx_course_offerings_lecturer ON course_offerings(lecturer_user_id);
+
+
+-- ============================================================
+-- 3) enrollments
+-- ============================================================
+CREATE TABLE IF NOT EXISTS enrollments (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+  offering_id        UUID NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+  user_id            UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+
+  status             TEXT NOT NULL DEFAULT 'active',
+  enrolled_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ended_at           TIMESTAMPTZ NULL,
+
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT enrollments_status_valid
+    CHECK (status IN ('active','dropped','completed','blocked'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_enrollment_unique
+  ON enrollments (offering_id, user_id);
+
+CREATE INDEX IF NOT EXISTS idx_enrollments_user ON enrollments(user_id);
+CREATE INDEX IF NOT EXISTS idx_enrollments_offering ON enrollments(offering_id);
+
+
+-- ============================================================
+-- 4) enrollment_events (audit trail)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS enrollment_events (
+  id                 BIGSERIAL PRIMARY KEY,
+
+  enrollment_id      UUID NOT NULL REFERENCES enrollments(id) ON DELETE CASCADE,
+
+  event_type         TEXT NOT NULL,
+  actor_user_id      UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+  note               TEXT NULL,
+
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT enrollment_events_type_not_empty CHECK (length(trim(event_type)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_enrollment_events_enrollment ON enrollment_events(enrollment_id);
+CREATE INDEX IF NOT EXISTS idx_enrollment_events_actor ON enrollment_events(actor_user_id);
+
+
+-- ============================================================
+-- 5) chat_sessions.course_id → FK(courses.course_code)
+-- ============================================================
+ALTER TABLE chat_sessions
+  ALTER COLUMN course_id TYPE TEXT;
+
+-- create missing courses from existing chat rows
+INSERT INTO courses (course_code, course_name)
+SELECT DISTINCT course_id, course_id
+FROM chat_sessions
+WHERE course_id IS NOT NULL
+  AND course_id NOT IN (SELECT course_code FROM courses)
+ON CONFLICT (course_code) DO NOTHING;
+
+-- add FK only if not exists (Postgres doesn't have IF NOT EXISTS for constraints)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_chat_sessions_course'
+  ) THEN
+    ALTER TABLE chat_sessions
+      ADD CONSTRAINT fk_chat_sessions_course
+      FOREIGN KEY (course_id)
+      REFERENCES courses(course_code)
+      ON DELETE SET NULL;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_course_id ON chat_sessions(course_id);
+
+
+-- ============================================================
+-- 6) ingested_documents.course_id → FK(courses.course_code)
+-- ============================================================
+ALTER TABLE ingested_documents
+  ALTER COLUMN course_id TYPE TEXT;
+
+-- create missing courses from existing ingestion rows
+INSERT INTO courses (course_code, course_name)
+SELECT DISTINCT course_id, course_id
+FROM ingested_documents
+WHERE course_id IS NOT NULL
+  AND course_id NOT IN (SELECT course_code FROM courses)
+ON CONFLICT (course_code) DO NOTHING;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_ingested_documents_course'
+  ) THEN
+    ALTER TABLE ingested_documents
+      ADD CONSTRAINT fk_ingested_documents_course
+      FOREIGN KEY (course_id)
+      REFERENCES courses(course_code)
+      ON DELETE CASCADE;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_ingested_documents_course_id ON ingested_documents(course_id);

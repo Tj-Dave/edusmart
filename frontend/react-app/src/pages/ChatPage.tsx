@@ -3,7 +3,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCourseStore } from '../state/courseStore';
 import { useAuth } from '../state/AuthContext';
-import { chatApi, ingestionApi } from '../services/api';
+import { chatApi, ingestionApi, enrollmentApi, courseApi } from '../services/api';
 import MarkdownMessage from "../components/markdownMessage";
 
 interface Citation {
@@ -104,6 +104,8 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   const [isFetchingSession, setIsFetchingSession] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => (typeof window !== 'undefined' ? window.innerWidth >= 1024 : true));
+  const [sidebarWidth, setSidebarWidth] = useState(288);
+  const [isResizing, setIsResizing] = useState(false);
   const [showSwitchCourseConfirm, setShowSwitchCourseConfirm] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
@@ -114,8 +116,20 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   const [publicQueryCount, setPublicQueryCount] = useState(0);
   const [showPublicLimitModal, setShowPublicLimitModal] = useState(false);
   const [currentChatTitle, setCurrentChatTitle] = useState(DEFAULT_CHAT_TITLE);
+  const [showCourseDropdown, setShowCourseDropdown] = useState(false);
+  const [enrolledCourses, setEnrolledCourses] = useState<any[]>([]);
+  const [showEnrollModal, setShowEnrollModal] = useState(false);
+  const [enrollmentKey, setEnrollmentKey] = useState('');
+  const [searchCourseCode, setSearchCourseCode] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isEnrolling, setIsEnrolling] = useState(false);
+  const [enrollError, setEnrollError] = useState<string | null>(null);
+  const [showEnrollSuccess, setShowEnrollSuccess] = useState(false);
+  const [enrolledCourseInfo, setEnrolledCourseInfo] = useState<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
+  const courseDropdownRef = useRef<HTMLDivElement>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
   const token = localStorage.getItem('auth_token') || '';
   const demoToken = DEMO_AUTH_TOKEN;
   const isDemoBackendAvailable = Boolean(demoToken);
@@ -195,7 +209,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
           return;
         }
 
-        const sessions = await chatApi.listSessions(token, false);
+        const sessions = await chatApi.listSessions(token, { includeArchived: false });
 
         const normalized: ChatHistory[] = (sessions || [])
           .map((s: any) => ({
@@ -228,6 +242,44 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Load enrolled courses
+  useEffect(() => {
+    if (isPublicPreview || !token || !user?.id) return;
+
+    const loadEnrolledCourses = async () => {
+      try {
+        const enrollments = await enrollmentApi.list(token, { user_id: user.id });
+        console.log("Raw enrollments:", enrollments);
+
+        const uniqueCourses = new Map<string, { code: string; name: string }>();
+
+        for (const enrollment of enrollments) {
+          console.log("Processing enrollment:", enrollment);
+
+          if (enrollment.status !== "active") continue;
+
+          const offering = enrollment.offering;
+          if (!offering) continue;
+
+          const code = offering.course_code;
+          const name = offering.course?.course_name ?? code;
+
+          if (!uniqueCourses.has(code)) {
+            uniqueCourses.set(code, { code, name });
+          }
+        }
+
+        const courses = Array.from(uniqueCourses.values());
+        console.log("Enrolled courses:", courses);
+        setEnrolledCourses(courses);
+
+      } catch (err) {
+        console.error("Failed to load enrolled courses:", err);
+      }
+    };
+
+    loadEnrolledCourses();
+  }, [isPublicPreview, token, user?.id]);
 
 
   // Auto-scroll to bottom
@@ -241,10 +293,45 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
         setSidebarOpen(true);
       }
     };
-
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (courseDropdownRef.current && !courseDropdownRef.current.contains(event.target as Node)) {
+        setShowCourseDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Sidebar resize handler
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      const newWidth = e.clientX;
+      if (newWidth >= 200 && newWidth <= 500) {
+        setSidebarWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
 
   // ==================== HANDLERS ====================
 
@@ -457,19 +544,6 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     }
   };
 
-  const refreshSessions = async (): Promise<ChatHistory[]> => {
-    const sessions = await chatApi.listSessions(token, false);
-    const normalized: ChatHistory[] = (sessions || []).map((s: any) => ({
-      session_id: (s?.id || s?.session_id || s?.chat_id).toString(),
-      title: s?.title || DEFAULT_CHAT_TITLE,
-      created_at: s?.created_at || new Date().toISOString(),
-      message_preview: s?.message_preview || undefined,
-    }));
-
-    setChatHistory(normalized);
-    return normalized;
-  };
-
   const handleNewChat = async () => {
     // Demo-local keeps its behavior (optional)
     if (useLocalDemo) {
@@ -584,14 +658,6 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     }
   };
 
-  const handleSwitchCourse = () => {
-    if (isPublicPreview) {
-      navigate('/login');
-      return;
-    }
-    setShowSwitchCourseConfirm(true);
-  };
-
   const confirmSwitchCourse = () => {
     // Clear all context and redirect
     setShowSwitchCourseConfirm(false);
@@ -614,23 +680,153 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     navigate('/general-settings');
   };
 
-  const handleDeleteChat = (sessionId: string) => {
+  const handleDeleteChat = async (sessionId: string) => {
     if (isPublicPreview) return;
-    // Remove from chat history
-    setChatHistory(prev => prev.filter(chat => chat.session_id !== sessionId));
-    setOpenMenuSessionId(null);
-    
-    // If we're viewing the deleted chat, switch to the first available or clear
-    if (currentSession?.id === sessionId) {
-      const remaining = chatHistory.filter(chat => chat.session_id !== sessionId);
-      if (remaining.length > 0) {
-        handleSelectChat(remaining[0].session_id);
-      } else {
-        setCurrentSession(prev =>
-          prev ? { ...prev, id: `local-${Date.now()}`, message_count: 0 } : null
-        );
-        setMessages([]);
+    try {
+      await chatApi.deleteSession(token, sessionId);
+      setChatHistory(prev => prev.filter(chat => chat.session_id !== sessionId));
+      setOpenMenuSessionId(null);
+      if (currentSession?.id === sessionId) {
+        handleNewChat();
       }
+    } catch (err: any) {
+      console.error('Failed to delete chat:', err);
+      setError(err?.message || 'Failed to delete chat');
+    }
+  };
+
+  const handleArchiveChat = async (sessionId: string) => {
+    if (isPublicPreview) return;
+    try {
+      await chatApi.archiveSession(token, sessionId, true);
+      setChatHistory(prev => prev.filter(chat => chat.session_id !== sessionId));
+      setOpenMenuSessionId(null);
+      if (currentSession?.id === sessionId) {
+        handleNewChat();
+      }
+    } catch (err: any) {
+      console.error('Failed to archive chat:', err);
+      setError(err?.message || 'Failed to archive chat');
+    }
+  };
+
+  const handleSelectCourse = async (course: any) => {
+    useCourseStore.setState({ courseCode: course.code, courseName: course.name });
+    setShowCourseDropdown(false);
+    // Load chats for this course
+    if (!token) return;
+    try {
+      const sessions = await chatApi.listSessions(token, { 
+        includeArchived: false, 
+        course_id: course.code === 'GENERAL' ? undefined : course.code,
+        general_only: course.code === 'GENERAL' ? true : undefined
+      });
+      const normalized: ChatHistory[] = (sessions || [])
+        .map((s: any) => ({
+          session_id: (s?.id || s?.session_id || s?.chat_id).toString(),
+          title: s?.title || DEFAULT_CHAT_TITLE,
+          created_at: s?.created_at || new Date().toISOString(),
+          message_preview: s?.message_preview || undefined,
+        }))
+        .sort((a: ChatHistory, b: ChatHistory) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setChatHistory(normalized);
+    } catch (err) {
+      console.error('Failed to load course chats:', err);
+    }
+    handleNewChat();
+  };
+
+  const handleSearchOfferings = async () => {
+    if (!searchCourseCode.trim()) return;
+    setEnrollError(null);
+    try {
+      const results = await enrollmentApi.searchOfferings(token, { course_code: searchCourseCode.trim() });
+      setSearchResults(results);
+    } catch (err: any) {
+      setEnrollError(err?.message || 'Failed to search courses');
+    }
+  };
+
+  const handleEnrollByKey = async () => {
+    if (!enrollmentKey.trim()) return;
+    setIsEnrolling(true);
+    setEnrollError(null);
+    try {
+      const enrollment = await enrollmentApi.enrollByKey(token, { enrollment_key: enrollmentKey.trim() });
+      const courseCode = enrollment.offering?.course_code;
+      let courseName = courseCode;
+      try {
+        const courseDetails = await courseApi.get(token, courseCode);
+        courseName = courseDetails.course_name || courseCode;
+      } catch (err) {
+        console.log('Could not fetch course details');
+      }
+      setEnrolledCourseInfo({ code: courseCode, name: courseName });
+      setShowEnrollModal(false);
+      setShowEnrollSuccess(true);
+      setEnrollmentKey('');
+      // Reload enrolled courses
+      const enrollments = await enrollmentApi.list(token, { user_id: user?.id });
+      const uniqueCourses = new Map();
+      for (const e of enrollments) {
+        if (e.status === 'active' && e.offering) {
+          const code = e.offering.course_code;
+          if (!uniqueCourses.has(code)) {
+            let name = code;
+            try {
+              const details = await courseApi.get(token, code);
+              name = details.course_name || code;
+            } catch (err) {}
+            uniqueCourses.set(code, { code, name });
+          }
+        }
+      }
+      setEnrolledCourses(Array.from(uniqueCourses.values()));
+    } catch (err: any) {
+      setEnrollError(err?.message || 'Failed to enroll');
+    } finally {
+      setIsEnrolling(false);
+    }
+  };
+
+  const handleEnrollInOffering = async (offeringId: string, courseCode: string) => {
+    setIsEnrolling(true);
+    setEnrollError(null);
+    try {
+      await enrollmentApi.enroll(token, { offering_id: offeringId });
+      let courseName = courseCode;
+      try {
+        const courseDetails = await courseApi.get(token, courseCode);
+        courseName = courseDetails.course_name || courseCode;
+      } catch (err) {
+        console.log('Could not fetch course details');
+      }
+      setEnrolledCourseInfo({ code: courseCode, name: courseName });
+      setShowEnrollModal(false);
+      setShowEnrollSuccess(true);
+      setSearchCourseCode('');
+      setSearchResults([]);
+      // Reload enrolled courses
+      const enrollments = await enrollmentApi.list(token, { user_id: user?.id });
+      const uniqueCourses = new Map();
+      for (const e of enrollments) {
+        if (e.status === 'active' && e.offering) {
+          const code = e.offering.course_code;
+          if (!uniqueCourses.has(code)) {
+            let name = code;
+            try {
+              const details = await courseApi.get(token, code);
+              name = details.course_name || code;
+            } catch (err) {}
+            uniqueCourses.set(code, { code, name });
+          }
+        }
+      }
+      setEnrolledCourses(Array.from(uniqueCourses.values()));
+    } catch (err: any) {
+      setEnrollError(err?.message || 'Failed to enroll');
+    } finally {
+      setIsEnrolling(false);
     }
   };
 
@@ -667,9 +863,11 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     <div className="h-screen overflow-hidden bg-gray-50 text-gray-900 flex flex-col lg:flex-row">
       {/* Sidebar */}
       <div
+        ref={sidebarRef}
+        style={{ width: sidebarOpen && window.innerWidth >= 1024 ? `${sidebarWidth}px` : undefined }}
         className={`${
-          sidebarOpen ? 'w-full max-h-[70vh] lg:w-72' : 'w-full max-h-0 lg:w-0'
-        } lg:max-h-none transition-all duration-300 overflow-hidden bg-white border-b border-gray-200 lg:border-b-0 lg:border-r text-gray-900 flex flex-col shadow-sm`}
+          sidebarOpen ? 'w-full max-h-[70vh] lg:max-h-none' : 'w-full max-h-0 lg:w-0'
+        } transition-all duration-300 overflow-hidden bg-white border-b border-gray-200 lg:border-b-0 lg:border-r text-gray-900 flex flex-col shadow-sm relative`}
       >
         {/* Sidebar Header */}
         <div className="p-4 border-b border-gray-200">
@@ -729,6 +927,16 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
                       {openMenuSessionId === chat.session_id && (
                         <div className="absolute right-0 mt-1 w-32 bg-white border border-gray-200 rounded-lg shadow-lg z-10">
                           <button
+                            onClick={() => handleArchiveChat(chat.session_id)}
+                            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition flex items-center gap-2"
+                          >
+                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                              <path d="M4 3a2 2 0 100 4h12a2 2 0 100-4H4z" />
+                              <path fillRule="evenodd" d="M3 8h14v7a2 2 0 01-2 2H5a2 2 0 01-2-2V8zm5 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" clipRule="evenodd" />
+                            </svg>
+                            Archive
+                          </button>
+                          <button
                             onClick={() => handleDeleteChat(chat.session_id)}
                             className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition flex items-center gap-2"
                           >
@@ -760,14 +968,70 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
               </button>
             </div>
           ) : (
-            <button
-              onClick={handleSwitchCourse}
-              className="w-full px-4 py-2 bg-white border border-gray-300 rounded-xl font-medium text-xs tracking-wide hover:bg-gray-50 transition"
-            >
-              Switch Course
-            </button>
+            <div className="relative" ref={courseDropdownRef}>
+              <button
+                onClick={() => setShowCourseDropdown(!showCourseDropdown)}
+                className="w-full px-4 py-2 bg-white border border-gray-300 rounded-xl font-medium text-xs tracking-wide hover:bg-gray-50 transition flex items-center justify-between"
+              >
+                <span>{courseCode || 'Select Course'}</span>
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+              {showCourseDropdown && (
+                <div className="absolute bottom-full left-0 right-0 mb-2 bg-white border border-gray-200 rounded-xl shadow-xl z-50 max-h-64 overflow-y-auto">
+                  <div className="py-1">
+                    <button
+                      onClick={() => handleSelectCourse({ code: 'GENERAL', name: 'General Chat' })}
+                      className="w-full text-left px-4 py-2 text-sm hover:bg-blue-50 transition"
+                    >
+                      <div className="font-medium text-gray-900">General Chat</div>
+                      <div className="text-xs text-gray-500">No course context</div>
+                    </button>
+                  </div>
+                  {enrolledCourses.length > 0 && (
+                    <>
+                      <div className="border-t border-gray-200 my-1"></div>
+                      <div className="py-1">
+                        {enrolledCourses.map((course) => (
+                          <button
+                            key={course.code}
+                            onClick={() => handleSelectCourse(course)}
+                            className="w-full text-left px-4 py-2 text-sm hover:bg-blue-50 transition"
+                          >
+                            <div className="font-medium text-gray-900">{course.code}</div>
+                            <div className="text-xs text-gray-500">{course.name}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <div className="border-t border-gray-200">
+                    <button
+                      onClick={() => { setShowEnrollModal(true); setShowCourseDropdown(false); }}
+                      className="w-full text-left px-4 py-2 text-sm text-blue-600 hover:bg-blue-50 transition flex items-center gap-2"
+                    >
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
+                      </svg>
+                      Add Course
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
+
+        {/* Resize Handle */}
+        {sidebarOpen && (
+          <div
+            onMouseDown={() => setIsResizing(true)}
+            className="hidden lg:block absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 transition-colors group"
+          >
+            <div className="absolute top-1/2 right-0 -translate-y-1/2 w-1 h-12 bg-gray-300 group-hover:bg-blue-500 rounded-l transition-colors" />
+          </div>
+        )}
       </div>
 
       {/* Main Content */}
@@ -791,22 +1055,15 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
                 </svg>
               </button>
               <div className="min-w-0">
-                <p className="text-xs uppercase tracking-[0.2em] text-gray-400">Chat title</p>
+                <p className="text-md uppercase tracking-[0.3em] text-gray-400">{`${activeCourseName}`}</p>
                 <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 truncate">{currentChatTitle}</h1>
                 <p className="text-sm text-gray-500">
-                  {!isPublicPreview && !courseCode && (
+                  {!isPublicPreview && (!courseCode || courseCode === 'GENERAL') && (
                     <div className="mt-2 inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       <span>⚠️</span>
                       <span>
                         No course context selected. Answers may be less accurate. Select a course for better results.
                       </span>
-                      <button
-                        className="ml-2 underline font-semibold"
-                        onClick={() => navigate("/course-selection")}
-                        type="button"
-                      >
-                        Select course
-                      </button>
                     </div>
                   )}
                 </p>
@@ -901,7 +1158,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
                 <p className="text-gray-500">
                   {isPublicPreview
                     ? 'This preview uses our demo corpus so you can feel the real chat flow. Sign in when you are ready to bring in your lecturers and uploads.'
-                    : `You are grounded in ${activeCourseName}. Ask anything and EduSmart will cite the lecturer materials you have uploaded.`}
+                    : `You’re currently exploring ${activeCourseName}. Ask EduSmart a question to get started. I’m here to help you master the material.`}
                 </p>
               </div>
             </div>
@@ -1154,6 +1411,137 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
                 >
                   Stay here
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Enrollment Modal */}
+        {!isPublicPreview && showEnrollModal && (
+          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
+            <div className="bg-white border border-gray-200 rounded-3xl shadow-2xl p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-2xl font-semibold text-gray-900">Enroll in Course</h2>
+                <button onClick={() => { setShowEnrollModal(false); setEnrollError(null); setSearchResults([]); }} className="text-gray-400 hover:text-gray-600">
+                  <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+              {enrollError && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">{enrollError}</div>
+              )}
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Enrollment Key</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={enrollmentKey}
+                      onChange={(e) => setEnrollmentKey(e.target.value)}
+                      placeholder="Enter enrollment key"
+                      className="flex-1 px-4 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                    <button
+                      onClick={handleEnrollByKey}
+                      disabled={!enrollmentKey.trim() || isEnrolling}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    >
+                      {isEnrolling ? 'Enrolling...' : 'Enroll'}
+                    </button>
+                  </div>
+                </div>
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-gray-300"></div>
+                  </div>
+                  <div className="relative flex justify-center text-sm">
+                    <span className="px-2 bg-white text-gray-500">OR</span>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Search Open Courses</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={searchCourseCode}
+                      onChange={(e) => setSearchCourseCode(e.target.value)}
+                      placeholder="Enter course code"
+                      className="flex-1 px-4 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                    <button
+                      onClick={handleSearchOfferings}
+                      disabled={!searchCourseCode.trim()}
+                      className="px-4 py-2 bg-gray-600 text-white rounded-xl hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    >
+                      Search
+                    </button>
+                  </div>
+                  {searchResults.length > 0 && (
+                    <div className="mt-4 space-y-2 max-h-64 overflow-y-auto">
+                      {searchResults.map((offering) => (
+                        <div key={offering.id} className="p-3 border border-gray-200 rounded-xl hover:bg-gray-50">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="font-medium text-gray-900">{offering.course_code}</div>
+                              <div className="text-xs text-gray-500">
+                                {offering.term} {offering.year} {offering.section && `• Section ${offering.section}`}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleEnrollInOffering(offering.id, offering.course_code)}
+                              disabled={isEnrolling}
+                              className="px-3 py-1 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-40 transition"
+                            >
+                              Enroll
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Enrollment Success Modal */}
+        {!isPublicPreview && showEnrollSuccess && enrolledCourseInfo && (
+          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
+            <div className="bg-white border border-gray-200 rounded-3xl shadow-2xl p-6 max-w-md w-full">
+              <div className="text-center">
+                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-8 h-8 text-green-600" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                </div>
+                <h2 className="text-2xl font-semibold text-gray-900 mb-2">Successfully Enrolled!</h2>
+                <p className="text-gray-600 mb-6">You've been enrolled in:</p>
+                <div className="bg-blue-50 border border-blue-200 rounded-2xl p-4 mb-6">
+                  <div className="text-lg font-semibold text-blue-900">{enrolledCourseInfo.code}</div>
+                  <div className="text-sm text-blue-700">{enrolledCourseInfo.name}</div>
+                </div>
+                <p className="text-sm text-gray-500 mb-6">
+                  You can now access course materials and start chatting with EduSmart in the context of this course.
+                </p>
+                <div className="flex flex-col gap-3">
+                  <button
+                    onClick={() => {
+                      handleSelectCourse(enrolledCourseInfo);
+                      setShowEnrollSuccess(false);
+                    }}
+                    className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 font-medium transition"
+                  >
+                    Start Chatting in {enrolledCourseInfo.code}
+                  </button>
+                  <button
+                    onClick={() => setShowEnrollSuccess(false)}
+                    className="w-full px-4 py-2.5 border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 font-medium transition"
+                  >
+                    Continue Browsing
+                  </button>
+                </div>
               </div>
             </div>
           </div>

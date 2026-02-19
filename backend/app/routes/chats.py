@@ -179,6 +179,7 @@ def create_chat(
             user_id=str(current_user.id),
             course_id=course_code,   # stored in DB as course_id
             title=payload.title,
+            auto_create_course=False,
         )
         return s
     except ValueError as e:
@@ -190,12 +191,17 @@ def list_chats(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     include_archived: bool = Query(default=False),
+    course_id: str | None = Query(default=None),
+    general_only: bool = Query(default=False),
 ):
     return crud_chats.list_chat_sessions(
         db,
         user_id=str(current_user.id),
         include_archived=include_archived,
+        course_id=course_id,
+        general_only=general_only,
     )
+
 
 
 @router.get("/{session_id}", response_model=ChatSessionDetailOut)
@@ -237,6 +243,33 @@ async def send_message(
 # ✅ NEW: Atomic chat query
 # POST /chats/query
 # =========================
+@router.delete("/{session_id}")
+def delete_chat(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        crud_chats.delete_chat_session(db, user_id=str(current_user.id), session_id=session_id)
+        return {"message": "Chat session deleted"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.patch("/{session_id}/archive")
+def archive_chat(
+    session_id: UUID,
+    is_archived: bool = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        s = crud_chats.set_chat_archived(db, user_id=str(current_user.id), session_id=session_id, is_archived=is_archived)
+        return s
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.post("/query", response_model=ChatQueryOut)
 async def chat_query_atomic(
     payload: ChatQueryIn,
