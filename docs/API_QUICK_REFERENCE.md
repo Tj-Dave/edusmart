@@ -121,3 +121,74 @@ Example log:
     "status": "success",
     "chunks": 42
 }
+
+# ============================================================================
+# CURRICULUM SPEC / ROADMAP / ASSESSMENT / PROGRESS (NEW)
+# ============================================================================
+
+Auth header for all examples:
+Authorization: Bearer <JWT>
+
+1) Extract course spec draft from an already ingested blueprint document:
+
+curl -X POST "http://localhost:8000/offerings/{offering_id}/specs/extract" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT>" \
+  -d '{
+        "document_id": "00000000-0000-0000-0000-000000000000",
+        "mode": "extract_only"
+      }'
+
+2) Approve the reviewed spec:
+
+curl -X POST "http://localhost:8000/specs/{spec_id}/approve" \
+  -H "Authorization: Bearer <JWT>"
+
+3) Generate and activate roadmap:
+
+curl -X POST "http://localhost:8000/offerings/{offering_id}/roadmap/generate" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT>" \
+  -d '{"archive_existing_drafts": true}'
+
+curl -X POST "http://localhost:8000/offerings/{offering_id}/roadmap/activate" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT>" \
+  -d '{"archive_existing_active": true}'
+
+4) Create a task under roadmap item:
+
+curl -X POST "http://localhost:8000/roadmap-items/{item_id}/tasks" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT>" \
+  -d '{
+        "title": "Quiz 1",
+        "task_type": "quiz",
+        "max_score": 20,
+        "max_attempts": 2,
+        "attempt_scoring_rule": "best",
+        "allow_late_submission": true,
+        "late_penalty_percent": 10
+      }'
+
+5) Student attempt lifecycle:
+
+curl -X POST "http://localhost:8000/enrollments/{enrollment_id}/tasks/{task_id}/attempts" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT>" \
+  -d '{}'
+
+curl -X POST "http://localhost:8000/enrollments/{enrollment_id}/tasks/{task_id}/attempts/1/submit" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT>" \
+  -d '{"evidence_url":"https://example.com/submission/1"}'
+
+curl -X POST "http://localhost:8000/enrollments/{enrollment_id}/tasks/{task_id}/attempts/1/grade" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <JWT>" \
+  -d '{"score": 18, "feedback":"Strong work"}'
+
+6) Student roadmap with progress and rollups:
+
+curl -X GET "http://localhost:8000/enrollments/{enrollment_id}/roadmap" \
+  -H "Authorization: Bearer <JWT>"
