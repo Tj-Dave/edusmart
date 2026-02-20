@@ -19,9 +19,10 @@ from app.services.memory.memory_manager import MemoryManagerPG
 from app.routes.ai_query import router as ai_query_router
 from app.routes.chats import router as chats_router
 from app.routes.auth import router as auth_router
-from app.routes.ingestion import router as ingestion_router  # ✅ add
+from backend.app.routes.ingestion_router import router as ingestion_router  # ✅ add
 
 app = FastAPI(title="EduSmart Backend")
+app.include_router(ingestion_router)  
 
 # ✅ CORS for Vite frontend
 app.add_middleware(

@@ -155,8 +155,8 @@ export default function UploadPage() {
       return true;
     });
 
-    if (validFiles.length + selectedFiles.length > 10) {
-      setError('Maximum 10 files per upload');
+    if (validFiles.length + selectedFiles.length > 5) {
+      setError('Maximum 5 files per upload');
       return;
     }
 
