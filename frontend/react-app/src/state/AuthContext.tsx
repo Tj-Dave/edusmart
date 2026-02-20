@@ -7,39 +7,54 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(false); // Start as false for UI development
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Initialize from localStorage
+  // Initialize from localStorage and revalidate token
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
-    if (token) {
-      // Add timeout to prevent hanging if backend is down
-      const timeout = setTimeout(() => {
-        console.warn('Backend getMe request timed out - clearing token');
-        localStorage.removeItem('auth_token');
-        setIsLoading(false);
-      }, 3000);
+    const cachedUserRaw = localStorage.getItem('auth_user');
 
-      authApi
-        .getMe(token)
-        .then((fetchedUser) => {
-          clearTimeout(timeout);
-          setUser(fetchedUser);
-          setError(null);
-          setIsLoading(false);
-        })
-        .catch((err) => {
-          clearTimeout(timeout);
-          console.error('Failed to fetch user (backend may be down):', err);
-          localStorage.removeItem('auth_token');
-          setError(null);
-          setIsLoading(false);
-        });
-    } else {
-      // No token - user not logged in, immediately ready
-      setIsLoading(false);
+    if (cachedUserRaw) {
+      try {
+        const parsedUser = JSON.parse(cachedUserRaw) as User;
+        setUser(parsedUser);
+      } catch {
+        localStorage.removeItem('auth_user');
+      }
     }
+
+    if (!token) {
+      setIsLoading(false);
+      return;
+    }
+
+    authApi
+      .getMe(token)
+      .then((fetchedUser) => {
+        setUser(fetchedUser);
+        localStorage.setItem('auth_user', JSON.stringify(fetchedUser));
+        setError(null);
+      })
+      .catch((err: any) => {
+        const status = err?.status;
+        const isAuthError = status === 401 || status === 403;
+
+        if (isAuthError) {
+          localStorage.removeItem('auth_token');
+          localStorage.removeItem('auth_user');
+          setUser(null);
+          setError('Session expired. Please login again.');
+          return;
+        }
+
+        // Keep persisted session for non-auth failures (e.g. temporary backend/network issue)
+        console.error('Session revalidation failed:', err);
+        setError(null);
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
   }, []);
 
   const login = async (email: string, password: string) => {
@@ -48,6 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const response = await authApi.login(email, password);
       localStorage.setItem('auth_token', response.access_token);
+      localStorage.setItem('auth_user', JSON.stringify(response.user));
       setUser(response.user);
     } catch (err: any) {
       const message = err.message || 'Login failed';
@@ -105,6 +121,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = () => {
     localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_user');
     setUser(null);
     setError(null);
   };

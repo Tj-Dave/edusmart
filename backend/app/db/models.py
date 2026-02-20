@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     Boolean,
+    Numeric,
     CheckConstraint,
     DateTime,
     Enum as SAEnum,
@@ -19,7 +20,7 @@ from sqlalchemy import (
     Index,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID, INET
+from sqlalchemy.dialects.postgresql import UUID, INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -523,4 +524,394 @@ class IngestedDocument(Base):
     __table_args__ = (
         UniqueConstraint("course_id", "uploader_user_id", "file_hash", name="uq_ingested_doc_course_uploader_hash"),
         Index("idx_ingested_documents_course_id", "course_id"),
+    )
+
+# -------------------------------------------------------------------
+# Curriculum Spec + Roadmap + Assessments + Progress Tracking (NEW)
+# -------------------------------------------------------------------
+
+# -----------------------------
+# Enums (new)
+# -----------------------------
+class CourseSpecStatus(str, enum.Enum):
+    draft_extracted = "draft_extracted"
+    lecturer_review = "lecturer_review"
+    approved_active = "approved_active"
+    archived = "archived"
+
+
+class RoadmapItemStatus(str, enum.Enum):
+    draft = "draft"
+    approved_active = "approved_active"
+    archived = "archived"
+
+
+class AssessmentTaskType(str, enum.Enum):
+    quiz = "quiz"
+    assignment = "assignment"
+    lab = "lab"
+    project = "project"
+    reflection = "reflection"
+    presentation = "presentation"
+    peer_review = "peer_review"
+    other = "other"
+
+
+class AttemptScoringRule(str, enum.Enum):
+    best = "best"
+    latest = "latest"
+    average = "average"
+    first = "first"
+
+
+class EnrollmentRoadmapStatus(str, enum.Enum):
+    not_started = "not_started"
+    in_progress = "in_progress"
+    submitted = "submitted"
+    completed = "completed"
+    blocked = "blocked"
+    skipped = "skipped"
+
+
+class EnrollmentTaskStatus(str, enum.Enum):
+    not_started = "not_started"
+    in_progress = "in_progress"
+    submitted = "submitted"
+    graded = "graded"
+    completed = "completed"
+
+
+# -----------------------------
+# offering_course_specs
+# -----------------------------
+class OfferingCourseSpec(Base):
+    """
+    Structured course spec extracted from an uploaded course blueprint document
+    and approved by the lecturer.
+
+    - 1 offering can have multiple specs over time (drafts, archived)
+    - but only one can be approved_active at a time (enforced by app logic;
+      optionally enforce with a partial unique index later).
+    """
+    __tablename__ = "offering_course_specs"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    course_offering_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("course_offerings.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # blueprint doc used (optional pointer; spec can exist even without doc link)
+    source_document_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ingested_documents.document_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    status: Mapped[CourseSpecStatus] = mapped_column(
+        SAEnum(CourseSpecStatus, name="course_spec_status"),
+        nullable=False,
+        server_default="draft_extracted",
+        index=True,
+    )
+
+    # Extracted structured content: CLOs, competencies, assessment plan, hours, etc.
+    spec_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    approved_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Relationships (optional)
+    offering: Mapped["CourseOffering"] = relationship()
+    source_document: Mapped[Optional["IngestedDocument"]] = relationship()
+    created_by: Mapped[Optional["User"]] = relationship(foreign_keys=[created_by_user_id])
+    approved_by: Mapped[Optional["User"]] = relationship(foreign_keys=[approved_by_user_id])
+
+    __table_args__ = (
+        Index("idx_offering_course_specs_offering", "course_offering_id"),
+        Index("idx_offering_course_specs_status", "status"),
+        CheckConstraint("jsonb_typeof(spec_json) = 'object'", name="offering_course_specs_spec_json_object"),
+    )
+
+
+# -----------------------------
+# offering_roadmap_items
+# -----------------------------
+class OfferingRoadmapItem(Base):
+    __tablename__ = "offering_roadmap_items"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    course_offering_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("course_offerings.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # traceability to the extracted spec snapshot that generated this roadmap
+    spec_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("offering_course_specs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    week_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    key_content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    teaching_activity: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    estimated_hours: Mapped[Optional[float]] = mapped_column(Numeric(4, 1), nullable=True)
+
+    # Denormalized helper for UI (truth source is roadmap_assessment_tasks)
+    assessment_task_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    status: Mapped[RoadmapItemStatus] = mapped_column(
+        SAEnum(RoadmapItemStatus, name="roadmap_item_status"),
+        nullable=False,
+        server_default="draft",
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Relationships
+    offering: Mapped["CourseOffering"] = relationship()
+    spec: Mapped[Optional["OfferingCourseSpec"]] = relationship()
+    assessment_tasks: Mapped[List["RoadmapAssessmentTask"]] = relationship(
+        back_populates="roadmap_item",
+        cascade="all, delete-orphan",
+        order_by="RoadmapAssessmentTask.display_order",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("course_offering_id", "sequence_no", name="uq_offering_roadmap_sequence"),
+        CheckConstraint("sequence_no > 0", name="offering_roadmap_sequence_positive"),
+        CheckConstraint("(week_no IS NULL) OR (week_no > 0)", name="offering_roadmap_week_positive"),
+        CheckConstraint("length(trim(title)) > 0", name="offering_roadmap_title_not_empty"),
+        Index("idx_offering_roadmap_offering", "course_offering_id"),
+        Index("idx_offering_roadmap_status", "status"),
+    )
+
+
+# -----------------------------
+# roadmap_assessment_tasks
+# -----------------------------
+class RoadmapAssessmentTask(Base):
+    __tablename__ = "roadmap_assessment_tasks"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    roadmap_item_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("offering_roadmap_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+
+    task_type: Mapped[AssessmentTaskType] = mapped_column(
+        SAEnum(AssessmentTaskType, name="assessment_task_type"),
+        nullable=False,
+        server_default="quiz",
+        index=True,
+    )
+
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    max_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, server_default="100")
+    weight: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
+
+    due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    is_required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+    # Lecturer-controlled attempt policy
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    attempt_scoring_rule: Mapped[AttemptScoringRule] = mapped_column(
+        SAEnum(AttemptScoringRule, name="attempt_scoring_rule"),
+        nullable=False,
+        server_default="best",
+    )
+
+    # Lecturer-controlled late submission policy
+    allow_late_submission: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    late_penalty_percent: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Relationships
+    roadmap_item: Mapped["OfferingRoadmapItem"] = relationship(back_populates="assessment_tasks")
+    task_results: Mapped[List["EnrollmentTaskResult"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="EnrollmentTaskResult.attempt_no",
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(trim(title)) > 0", name="roadmap_tasks_title_not_empty"),
+        CheckConstraint("max_attempts >= 1", name="roadmap_tasks_max_attempts_min_1"),
+        CheckConstraint("max_score > 0", name="roadmap_tasks_max_score_positive"),
+        CheckConstraint("(weight IS NULL) OR (weight >= 0)", name="roadmap_tasks_weight_nonneg"),
+        CheckConstraint(
+            "(late_penalty_percent IS NULL) OR (late_penalty_percent >= 0 AND late_penalty_percent <= 100)",
+            name="roadmap_tasks_late_penalty_range",
+        ),
+        Index("idx_roadmap_tasks_item", "roadmap_item_id"),
+        Index("idx_roadmap_tasks_active", "is_active"),
+        Index("idx_roadmap_tasks_type", "task_type"),
+    )
+
+
+# -----------------------------
+# enrollment_roadmap_progress
+# -----------------------------
+class EnrollmentRoadmapProgress(Base):
+    __tablename__ = "enrollment_roadmap_progress"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    enrollment_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("enrollments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    roadmap_item_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("offering_roadmap_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    status: Mapped[EnrollmentRoadmapStatus] = mapped_column(
+        SAEnum(EnrollmentRoadmapStatus, name="enrollment_roadmap_status"),
+        nullable=False,
+        server_default="not_started",
+        index=True,
+    )
+
+    completion_percent: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    # rollup performance (optional but helpful)
+    avg_score: Mapped[Optional[float]] = mapped_column(Numeric(6, 2), nullable=True)
+    best_score: Mapped[Optional[float]] = mapped_column(Numeric(6, 2), nullable=True)
+    total_score: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
+    max_total_score: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    enrollment: Mapped["Enrollment"] = relationship()
+    roadmap_item: Mapped["OfferingRoadmapItem"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("enrollment_id", "roadmap_item_id", name="uq_enrollment_roadmap_unique"),
+        CheckConstraint("completion_percent >= 0 AND completion_percent <= 100", name="enrollment_progress_pct_range"),
+        Index("idx_enrollment_roadmap_enrollment", "enrollment_id"),
+        Index("idx_enrollment_roadmap_item", "roadmap_item_id"),
+        Index("idx_enrollment_roadmap_status", "status"),
+    )
+
+
+# -----------------------------
+# enrollment_task_results (per attempt)
+# -----------------------------
+class EnrollmentTaskResult(Base):
+    __tablename__ = "enrollment_task_results"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    enrollment_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("enrollments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    task_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("roadmap_assessment_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    status: Mapped[EnrollmentTaskStatus] = mapped_column(
+        SAEnum(EnrollmentTaskStatus, name="enrollment_task_status"),
+        nullable=False,
+        server_default="not_started",
+        index=True,
+    )
+
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+    score: Mapped[Optional[float]] = mapped_column(Numeric(6, 2), nullable=True)
+
+    # snapshots protect history if lecturer edits task definition later
+    max_score_snapshot: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, server_default="100")
+    weight_snapshot: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
+
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    graded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    graded_by_user_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    enrollment: Mapped["Enrollment"] = relationship()
+    task: Mapped["RoadmapAssessmentTask"] = relationship(back_populates="task_results")
+    graded_by: Mapped[Optional["User"]] = relationship(foreign_keys=[graded_by_user_id])
+
+    __table_args__ = (
+        UniqueConstraint("enrollment_id", "task_id", "attempt_no", name="uq_enrollment_task_attempt"),
+        CheckConstraint("attempt_no >= 1", name="enrollment_task_attempt_min_1"),
+        CheckConstraint("(score IS NULL) OR (score >= 0)", name="enrollment_task_score_nonneg"),
+        Index("idx_enrollment_task_enrollment", "enrollment_id"),
+        Index("idx_enrollment_task_task", "task_id"),
+        Index("idx_enrollment_task_grader", "graded_by_user_id"),
+        Index("idx_enrollment_task_status", "status"),
     )

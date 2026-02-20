@@ -90,7 +90,18 @@ export const authApi = {
     const response = await fetch(`${API_BASE_URL}/auth/me`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!response.ok) throw new Error('Failed to fetch user');
+    if (!response.ok) {
+      let detail = 'Failed to fetch user';
+      try {
+        const parsed = await response.json();
+        detail = parsed?.detail || parsed?.message || detail;
+      } catch {
+        // fall through with default detail
+      }
+      const error = new Error(detail) as Error & { status?: number };
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   },
 
@@ -528,7 +539,7 @@ export const offeringApi = {
     const response = await fetch(`${API_BASE_URL}/courses/offerings?${query}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!response.ok) throw new Error('Failed to fetch offerings');
+    if (!response.ok) throw new Error(await safeParseError(response));
     return response.json();
   },
 
@@ -696,6 +707,220 @@ export const enrollmentApi = {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!response.ok) throw new Error('Failed to fetch enrollment events');
+    return response.json();
+  },
+};
+
+// ==================== Student Progress Endpoints ====================
+export const progressApi = {
+  getRoadmap: async (token: string, enrollmentId: string) => {
+    const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/roadmap`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  startItem: async (token: string, enrollmentId: string, itemId: string) => {
+    const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/roadmap/${itemId}/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  createAttempt: async (token: string, enrollmentId: string, taskId: string) => {
+    const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/tasks/${taskId}/attempts`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  submitAttempt: async (
+    token: string,
+    enrollmentId: string,
+    taskId: string,
+    attemptNo: number,
+    payload: { evidence_url?: string; payload?: unknown }
+  ) => {
+    const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/tasks/${taskId}/attempts/${attemptNo}/submit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload || {}),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  getProgressSummary: async (token: string, enrollmentId: string) => {
+    const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/progress`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+};
+
+// ==================== Lecturer Roadmap / Spec Endpoints ====================
+export const roadmapAdminApi = {
+  extractSpec: async (
+    token: string,
+    offeringId: string,
+    file: File,
+    mode: 'extract_only' | 'extract_and_draft_roadmap' = 'extract_only'
+  ) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('mode', mode);
+
+    const response = await fetch(`${API_BASE_URL}/offerings/${offeringId}/specs/extract`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: formData,
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  updateSpec: async (token: string, specId: string, payload: Record<string, unknown>) => {
+    const response = await fetch(`${API_BASE_URL}/specs/${specId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  approveSpec: async (token: string, specId: string) => {
+    const response = await fetch(`${API_BASE_URL}/specs/${specId}/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  generateRoadmap: async (token: string, offeringId: string) => {
+    const response = await fetch(`${API_BASE_URL}/offerings/${offeringId}/roadmap/generate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  activateRoadmap: async (token: string, offeringId: string) => {
+    const response = await fetch(`${API_BASE_URL}/offerings/${offeringId}/roadmap/activate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  listRoadmap: async (token: string, offeringId: string, status: 'approved_active' | 'draft' | 'all' = 'all') => {
+    const query = new URLSearchParams();
+    if (status) query.append('status', status);
+    const response = await fetch(`${API_BASE_URL}/offerings/${offeringId}/roadmap?${query}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  createRoadmapItem: async (token: string, offeringId: string, payload: Record<string, unknown>) => {
+    const response = await fetch(`${API_BASE_URL}/offerings/${offeringId}/roadmap-items`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  updateRoadmapItem: async (token: string, itemId: string, payload: Record<string, unknown>) => {
+    const response = await fetch(`${API_BASE_URL}/roadmap-items/${itemId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  archiveRoadmapItem: async (token: string, itemId: string) => {
+    const response = await fetch(`${API_BASE_URL}/roadmap-items/${itemId}/archive`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  createTask: async (token: string, itemId: string, payload: Record<string, unknown>) => {
+    const response = await fetch(`${API_BASE_URL}/roadmap-items/${itemId}/tasks`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  updateTask: async (token: string, taskId: string, payload: Record<string, unknown>) => {
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  deactivateTask: async (token: string, taskId: string) => {
+    const response = await fetch(`${API_BASE_URL}/tasks/${taskId}/deactivate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  reorderTasks: async (token: string, itemId: string, taskIds: string[]) => {
+    const response = await fetch(`${API_BASE_URL}/roadmap-items/${itemId}/tasks/reorder`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ task_ids: taskIds }),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
     return response.json();
   },
 };

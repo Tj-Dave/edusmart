@@ -109,3 +109,31 @@ def require_lecturer_or_admin_for_enrollment(
 
     return enrollment
 
+
+def require_enrollment_read_access(
+    db: Session,
+    *,
+    enrollment_id: UUID,
+    actor: User,
+) -> Enrollment:
+    """
+    Read-access policy for enrollment-linked views:
+    - student: own enrollment only
+    - lecturer: enrollments within their offerings only
+    - admin: any enrollment
+    """
+    if is_admin(actor):
+        return get_enrollment_or_404(db, enrollment_id)
+    if is_student(actor):
+        return require_student_owner_or_admin_for_enrollment(
+            db,
+            enrollment_id=enrollment_id,
+            actor=actor,
+        )
+    if is_lecturer(actor):
+        return require_lecturer_or_admin_for_enrollment(
+            db,
+            enrollment_id=enrollment_id,
+            actor=actor,
+        )
+    raise ServicePermissionError("You do not have permission to access this enrollment")

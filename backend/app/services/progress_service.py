@@ -419,3 +419,65 @@ def start_roadmap_item(
     db.commit()
     db.refresh(progress)
     return progress
+
+
+def get_enrollment_progress_summary(
+    db: Session,
+    *,
+    enrollment_id: UUID,
+    actor_user_id: str | None = None,
+) -> dict[str, Any]:
+    view = get_enrollment_roadmap_view(
+        db,
+        enrollment_id=enrollment_id,
+        actor_user_id=actor_user_id,
+    )
+    items = view.get("items", []) or []
+    progress_rows: list[EnrollmentRoadmapProgress] = [
+        entry["progress"]
+        for entry in items
+        if isinstance(entry, dict) and entry.get("progress") is not None
+    ]
+
+    total_items = len(items)
+    items_completed = sum(
+        1
+        for row in progress_rows
+        if (row.status.value if hasattr(row.status, "value") else str(row.status))
+        == EnrollmentRoadmapStatus.completed.value
+    )
+
+    if progress_rows:
+        overall_completion_percent = round(
+            sum(int(row.completion_percent or 0) for row in progress_rows) / len(progress_rows),
+            2,
+        )
+    else:
+        overall_completion_percent = 0.0
+
+    total_score = round(
+        sum(_to_float(row.total_score) or 0.0 for row in progress_rows),
+        4,
+    )
+    max_total_score = round(
+        sum(_to_float(row.max_total_score) or 0.0 for row in progress_rows),
+        4,
+    )
+
+    avg_candidates = [_to_float(row.avg_score) for row in progress_rows if _to_float(row.avg_score) is not None]
+    avg_score = round(sum(avg_candidates) / len(avg_candidates), 4) if avg_candidates else None
+
+    best_candidates = [_to_float(row.best_score) for row in progress_rows if _to_float(row.best_score) is not None]
+    best_score = round(max(best_candidates), 4) if best_candidates else None
+
+    return {
+        "enrollment_id": view.get("enrollment_id"),
+        "offering_id": view.get("offering_id"),
+        "total_items": total_items,
+        "items_completed": items_completed,
+        "overall_completion_percent": overall_completion_percent,
+        "avg_score": avg_score,
+        "best_score": best_score,
+        "total_score": total_score,
+        "max_total_score": max_total_score,
+    }

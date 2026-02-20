@@ -1,15 +1,61 @@
 from __future__ import annotations
 
 import json
+import mimetypes
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.db.models import CourseSpecStatus, IngestedDocument, OfferingCourseSpec, User
+from app.core.config import settings
+from app.db import metadata_store
+from app.db.models import (
+    CourseSpecStatus,
+    IngestedDocument,
+    IngestionStatus,
+    OfferingCourseSpec,
+    User,
+)
 from app.services.access_control import require_lecturer_or_admin_for_offering
 from app.services.domain_errors import ServiceNotFoundError, ServiceValidationError
 from app.services.roadmap_service import generate_roadmap_from_spec
+
+_ALLOWED_SPEC_EXTENSIONS = {".pdf", ".docx"}
+_ALLOWED_EXTRACT_MODES = {"extract_only", "extract_and_draft_roadmap"}
+
+
+def _safe_segment(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", (value or "").strip())
+    return cleaned or "unknown"
+
+
+def _safe_filename(value: str) -> str:
+    raw = (value or "").strip().replace("\\", "/")
+    name = raw.split("/")[-1]
+    cleaned = re.sub(r"[^a-zA-Z0-9._ -]+", "_", name).strip()
+    return cleaned or "uploaded_document"
+
+
+def _normalize_mode(mode: str | None) -> str:
+    resolved = (mode or "extract_only").strip()
+    if resolved not in _ALLOWED_EXTRACT_MODES:
+        raise ServiceValidationError("mode must be extract_only or extract_and_draft_roadmap")
+    return resolved
+
+
+def _resolve_unique_path(base_dir: Path, filename: str) -> Path:
+    candidate = base_dir / filename
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    suffix = candidate.suffix
+    for i in range(1, 10_000):
+        next_candidate = base_dir / f"{stem}_{i}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+    raise ServiceValidationError("Could not allocate a unique filename for upload")
 
 
 def _default_spec_json(doc: IngestedDocument) -> dict:
@@ -68,6 +114,7 @@ def extract_course_spec(
     mode: str = "extract_only",
     llm_client=None,
 ) -> tuple[OfferingCourseSpec, list | None]:
+    mode = _normalize_mode(mode)
     offering = require_lecturer_or_admin_for_offering(db, offering_id=offering_id, actor=actor)
 
     doc = (
@@ -115,6 +162,78 @@ course_id: {doc.course_id}
         )
 
     return spec, generated_items
+
+
+def extract_course_spec_from_upload(
+    db: Session,
+    *,
+    offering_id: UUID,
+    actor: User,
+    filename: str,
+    file_bytes: bytes,
+    mime_type: str | None = None,
+    mode: str = "extract_only",
+    llm_client=None,
+) -> tuple[OfferingCourseSpec, list | None, IngestedDocument]:
+    mode = _normalize_mode(mode)
+    if not file_bytes:
+        raise ServiceValidationError("Uploaded file is empty")
+
+    offering = require_lecturer_or_admin_for_offering(db, offering_id=offering_id, actor=actor)
+
+    safe_name = _safe_filename(filename)
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in _ALLOWED_SPEC_EXTENSIONS:
+        raise ServiceValidationError("Only PDF or DOCX files are supported for extraction")
+
+    docs_dir = Path(settings.BASE_DIR) / "docs" / _safe_segment(str(offering.course_code)) / str(offering.id)
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    storage_path = _resolve_unique_path(docs_dir, safe_name)
+    with storage_path.open("wb") as fp:
+        fp.write(file_bytes)
+
+    resolved_mime = mime_type or mimetypes.guess_type(str(storage_path))[0]
+    doc, _created = metadata_store.get_or_create_document(
+        db,
+        course_id=str(offering.course_code),
+        uploader_user_id=str(actor.id),
+        file_path=storage_path,
+        mime_type=resolved_mime,
+        storage_path=str(storage_path),
+    )
+    doc.original_filename = safe_name
+    doc.storage_path = str(storage_path)
+    doc.mime_type = resolved_mime
+    doc.status = IngestionStatus.ingesting
+    doc.error_message = None
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    try:
+        spec, generated_items = extract_course_spec(
+            db,
+            offering_id=offering_id,
+            actor=actor,
+            document_id=doc.document_id,
+            mode=mode,
+            llm_client=llm_client,
+        )
+    except Exception as err:
+        doc.status = IngestionStatus.failed
+        doc.error_message = str(err)
+        db.add(doc)
+        db.commit()
+        raise
+
+    doc.status = IngestionStatus.success
+    doc.error_message = None
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    return spec, generated_items, doc
 
 
 def update_course_spec(

@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     QUERY_LLM_CONTEXT_SIZE: int = 2048
     QUERY_LLM_THREADS: int = 8
-    QUERY_LLM_MAX_TOKENS: int = 512
+    QUERY_LLM_MAX_TOKENS: int = 1024
     QUERY_LLM_TEMPERATURE: float = 0.3
     QUERY_LLM_TOP_P: float = 0.9
 

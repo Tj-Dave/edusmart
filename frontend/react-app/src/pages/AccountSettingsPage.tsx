@@ -12,6 +12,7 @@ interface AccountSettings {
 export default function AccountSettingsPage() {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
+  const backPath = user?.role === 'lecturer' ? '/lecturer' : '/chat';
   const [settings, setSettings] = useState<AccountSettings>({
     username: user?.username || '',
     description: '',
@@ -172,9 +173,9 @@ export default function AccountSettingsPage() {
     <div className="min-h-screen bg-gray-50 flex">
       {/* Back Button */}
       <button
-        onClick={() => navigate('/chat')}
+        onClick={() => navigate(backPath)}
         className="fixed top-4 left-4 p-2 hover:bg-gray-200 rounded-lg transition z-10"
-        title="Back to chat"
+        title="Back"
       >
         <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
           <path fillRule="evenodd" d="M9.707 16.707a1 1 0 01-1.414 0l-6-6a1 1 0 010-1.414l6-6a1 1 0 011.414 1.414L5.414 9H17a1 1 0 110 2H5.414l4.293 4.293a1 1 0 010 1.414z" clipRule="evenodd" />

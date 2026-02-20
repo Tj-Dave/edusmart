@@ -207,6 +207,18 @@ class EnrollmentRoadmapViewOut(BaseModel):
     items: list[EnrollmentRoadmapItemOut] = []
 
 
+class EnrollmentProgressSummaryOut(BaseModel):
+    enrollment_id: UUID
+    offering_id: UUID
+    total_items: int
+    items_completed: int
+    overall_completion_percent: float
+    avg_score: float | None = None
+    best_score: float | None = None
+    total_score: float = 0
+    max_total_score: float = 0
+
+
 class AttemptCreateRequest(BaseModel):
     evidence_url: str | None = None
     payload: dict[str, Any] | None = None

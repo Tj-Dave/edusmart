@@ -57,41 +57,6 @@ def list_courses(
     return crud_courses.list_courses(db, q=q, is_active=is_active, limit=limit, offset=offset)
 
 
-@router.get("/{course_code}", response_model=CourseOut)
-def get_course(
-    course_code: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    c = crud_courses.get_course(db, course_code)
-    if not c:
-        raise HTTPException(status_code=404, detail="Course not found")
-    return c
-
-
-@router.patch("/{course_code}", response_model=CourseOut)
-def update_course(
-    course_code: str,
-    payload: CourseUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    try:
-        return crud_courses.update_course(
-            db,
-            course_code=course_code,
-            course_name=payload.course_name,
-            description=payload.description,
-            department=payload.department,
-            faculty=payload.faculty,
-            level=payload.level,
-            credits=payload.credits,
-            is_active=payload.is_active,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
 # -------------------------
 # Offerings
 # -------------------------
@@ -107,7 +72,7 @@ def create_offering(
 
     # Optional: prevent lecturer from creating offerings for someone else unless admin
     lecturer_id = payload.lecturer_user_id
-    if lecturer_id and lecturer_id != str(current_user.id) and current_user.role != UserRole.admin:
+    if lecturer_id and str(lecturer_id) != str(current_user.id) and current_user.role != UserRole.admin:
         raise HTTPException(status_code=403, detail="Lecturers can only assign themselves as lecturer_user_id")
 
     try:
@@ -194,3 +159,36 @@ def set_offering_enrollment_key(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/{course_code}", response_model=CourseOut)
+def get_course(
+    course_code: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    c = crud_courses.get_course(db, course_code)
+    if not c:
+        raise HTTPException(status_code=404, detail="Course not found")
+    return c
+
+
+@router.patch("/{course_code}", response_model=CourseOut)
+def update_course(
+    course_code: str,
+    payload: CourseUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        return crud_courses.update_course(
+            db,
+            course_code=course_code,
+            course_name=payload.course_name,
+            description=payload.description,
+            department=payload.department,
+            faculty=payload.faculty,
+            level=payload.level,
+            credits=payload.credits,
+            is_active=payload.is_active,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))

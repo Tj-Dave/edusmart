@@ -74,7 +74,7 @@ export default function UploadPage() {
     if (code) {
       setCourse(code, label || code);
     }
-    navigate('/chat');
+    navigate('/lecturer');
   };
 
   const fetchProfileAndData = async () => {

@@ -77,3 +77,9 @@ frontend/electron/dist/
 frontend/electron/node_modules/
 frontend/react-app/node_modules/
 frontend/react-app/node_modules/.vite/
+
+# ---------------------------------
+# Miscellaneous
+# ---------------------------------
+docs/BIO1101
+docs/CS102
