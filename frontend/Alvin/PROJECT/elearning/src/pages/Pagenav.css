@@ -1,0 +1,62 @@
+/* Shared nav for public pages */
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@500;700;800&family=Nunito:wght@400;600&display=swap');
+
+.pn-nav {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid transparent;
+  transition: border-color .2s, box-shadow .2s;
+  font-family: 'Nunito', sans-serif;
+}
+.pn-scrolled {
+  border-color: #dde6f0;
+  box-shadow: 0 2px 20px rgba(0,0,0,0.07);
+}
+.pn-inner {
+  max-width: 1200px; margin: 0 auto;
+  padding: 0 28px; height: 64px;
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+}
+.pn-logo {
+  display: flex; align-items: center; gap: 9px; text-decoration: none;
+}
+.pn-logo-icon {
+  width: 34px; height: 34px; border-radius: 9px;
+  background: linear-gradient(135deg, #1a6bff, #0040cc);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 3px 10px rgba(26,107,255,0.35);
+}
+.pn-logo-icon svg { stroke: #fff; }
+.pn-logo-text { font-family: 'Outfit', sans-serif; font-size: 1.1rem; font-weight: 800; color: #0d1b2a; letter-spacing: -0.3px; }
+
+.pn-links { display: flex; align-items: center; gap: 6px; }
+.pn-link {
+  padding: 7px 14px; border-radius: 8px;
+  font-size: 0.9rem; font-weight: 600; color: #4a5568;
+  text-decoration: none; transition: all .18s;
+}
+.pn-link:hover, .pn-link.active { background: #e8f0ff; color: #1a6bff; }
+.pn-btn-login {
+  padding: 8px 20px; margin-left: 6px;
+  border: 2px solid #1a6bff; border-radius: 9px;
+  font-size: 0.9rem; font-weight: 700; color: #1a6bff;
+  text-decoration: none; transition: all .18s;
+  font-family: 'Outfit', sans-serif;
+}
+.pn-btn-login:hover { background: #1a6bff; color: #fff; }
+
+.pn-mobile-btn {
+  display: none; background: none; border: none; cursor: pointer; padding: 4px; color: #0d1b2a;
+}
+@media(max-width:720px){
+  .pn-links { display: none; }
+  .pn-mobile-btn { display: flex; }
+}
+.pn-mobile-menu {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 20px 16px; border-top: 1px solid #dde6f0;
+  background: #fff;
+}
+.pn-mobile-menu .pn-link { font-size: 1rem; padding: 10px 14px; }
+.pn-mobile-menu .pn-btn-login { text-align: center; margin-top: 6px; }
