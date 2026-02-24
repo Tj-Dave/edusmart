@@ -216,6 +216,46 @@ COMMIT;
 -- ------------------------------------------------------------
 -- Relationship summary (for your teammate)
 -- ------------------------------------------------------------
+-- Notification System Tables
+-- ------------------------------------------------------------
+
+-- Enum for notification channels
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notification_channel') THEN
+        CREATE TYPE notification_channel AS ENUM ('in_app', 'email', 'push');
+    END IF;
+END$$;
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type varchar(64) NOT NULL,
+    title varchar(255) NOT NULL,
+    message text NOT NULL,
+    channel notification_channel NOT NULL,
+    is_read boolean NOT NULL DEFAULT false,
+    metadata jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS notification_templates (
+    id serial PRIMARY KEY,
+    event_type varchar(64) NOT NULL UNIQUE,
+    title_template varchar(255) NOT NULL,
+    body_template text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS notification_preferences (
+    user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    assignment_email boolean NOT NULL DEFAULT true,
+    assignment_push boolean NOT NULL DEFAULT true,
+    marketing_email boolean NOT NULL DEFAULT true,
+    payment_email boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+-- ------------------------------------------------------------
 -- users (1) ── (1) user_profiles
 -- users (1) ── (many) auth_sessions
 -- users (1) ── (many) chat_sessions
