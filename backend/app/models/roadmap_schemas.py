@@ -70,6 +70,11 @@ class TaskCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     task_type: str = "quiz"
     description: str | None = None
+    practical_brief: str | None = None
+    required_tools: str | None = None
+    expected_artifact: str | None = None
+    safety_notes: str | None = None
+    rubric_json: dict[str, Any] | None = None
     max_score: float = Field(default=100, gt=0)
     weight: float | None = Field(default=None, ge=0)
     due_at: datetime | None = None
@@ -86,6 +91,11 @@ class TaskUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=500)
     task_type: str | None = None
     description: str | None = None
+    practical_brief: str | None = None
+    required_tools: str | None = None
+    expected_artifact: str | None = None
+    safety_notes: str | None = None
+    rubric_json: dict[str, Any] | None = None
     max_score: float | None = Field(default=None, gt=0)
     weight: float | None = Field(default=None, ge=0)
     due_at: datetime | None = None
@@ -108,6 +118,11 @@ class RoadmapTaskOut(BaseModel):
     title: str
     task_type: str
     description: str | None
+    practical_brief: str | None
+    required_tools: str | None
+    expected_artifact: str | None
+    safety_notes: str | None
+    rubric_json: dict[str, Any] | None
     max_score: float
     weight: float | None
     due_at: Any | None
@@ -180,6 +195,9 @@ class EnrollmentTaskResultOut(BaseModel):
     graded_by_user_id: UUID | None
     feedback: str | None
     evidence_url: str | None
+    artifact_url: str | None
+    reflection_text: str | None
+    rubric_scores_json: dict[str, Any] | None
     created_at: Any
     updated_at: Any
 
@@ -221,17 +239,22 @@ class EnrollmentProgressSummaryOut(BaseModel):
 
 class AttemptCreateRequest(BaseModel):
     evidence_url: str | None = None
+    artifact_url: str | None = None
+    reflection_text: str | None = None
     payload: dict[str, Any] | None = None
 
 
 class AttemptSubmitRequest(BaseModel):
     evidence_url: str | None = None
+    artifact_url: str | None = None
+    reflection_text: str | None = None
     payload: dict[str, Any] | None = None
 
 
 class AttemptGradeRequest(BaseModel):
     score: float = Field(..., ge=0)
     feedback: str | None = None
+    rubric_scores: dict[str, float] | None = None
 
 
 class AttemptActionOut(BaseModel):

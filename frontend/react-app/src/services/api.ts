@@ -730,10 +730,19 @@ export const progressApi = {
     return response.json();
   },
 
-  createAttempt: async (token: string, enrollmentId: string, taskId: string) => {
+  createAttempt: async (
+    token: string,
+    enrollmentId: string,
+    taskId: string,
+    payload?: { evidence_url?: string; artifact_url?: string; reflection_text?: string; payload?: unknown }
+  ) => {
     const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/tasks/${taskId}/attempts`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload || {}),
     });
     if (!response.ok) throw new Error(await safeParseError(response));
     return response.json();
@@ -744,7 +753,7 @@ export const progressApi = {
     enrollmentId: string,
     taskId: string,
     attemptNo: number,
-    payload: { evidence_url?: string; payload?: unknown }
+    payload: { evidence_url?: string; artifact_url?: string; reflection_text?: string; payload?: unknown }
   ) => {
     const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/tasks/${taskId}/attempts/${attemptNo}/submit`, {
       method: 'POST',
@@ -760,6 +769,44 @@ export const progressApi = {
 
   getProgressSummary: async (token: string, enrollmentId: string) => {
     const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/progress`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  gradeAttempt: async (
+    token: string,
+    enrollmentId: string,
+    taskId: string,
+    attemptNo: number,
+    payload: { score: number; feedback?: string; rubric_scores?: Record<string, number> }
+  ) => {
+    const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/tasks/${taskId}/attempts/${attemptNo}/grade`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  getGamification: async (token: string, enrollmentId: string) => {
+    const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/gamification`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  getLeaderboard: async (token: string, enrollmentId: string, limit: number = 10) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/leaderboard?${query}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (response.status === 404) return null;

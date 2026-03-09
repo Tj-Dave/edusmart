@@ -19,6 +19,7 @@ from app.db.models import (
 )
 from app.services.domain_errors import ServiceNotFoundError, ServiceValidationError
 from app.services.event_service import emit_enrollment_event
+from app.services.gamification_service import award_xp_safe
 
 
 def _now() -> datetime:
@@ -414,6 +415,16 @@ def start_roadmap_item(
             event_type="roadmap_item_started",
             actor_user_id=actor_user_id,
             note={"roadmap_item_id": str(roadmap_item_id)},
+        )
+
+        award_xp_safe(
+            db,
+            user_id=enrollment.user_id,
+            enrollment_id=enrollment_id,
+            event_type="roadmap_item_started",
+            xp_delta=10,
+            reason="Started roadmap item",
+            metadata_json={"roadmap_item_id": str(roadmap_item_id)},
         )
 
     db.commit()

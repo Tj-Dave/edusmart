@@ -9,6 +9,8 @@ import {
 } from '../../services/api';
 import {
   AssessmentTask,
+  GamificationOverview,
+  OfferingLeaderboard,
   EnrollmentRoadmapProgress,
   RoadmapItem,
   RoadmapResponse,
@@ -280,12 +282,16 @@ export default function TopToolsDrawer({
   const [studentError, setStudentError] = useState<string | null>(null);
   const [roadmapData, setRoadmapData] = useState<RoadmapResponse | null>(null);
   const [progressSummary, setProgressSummary] = useState<Record<string, unknown> | null>(null);
+  const [gamification, setGamification] = useState<GamificationOverview | null>(null);
+  const [leaderboard, setLeaderboard] = useState<OfferingLeaderboard | null>(null);
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
   const [attemptFeedback, setAttemptFeedback] = useState<string | null>(null);
   const [latestAttemptByTask, setLatestAttemptByTask] = useState<Record<string, number>>({});
   const [creatingAttemptTaskId, setCreatingAttemptTaskId] = useState<string | null>(null);
   const [submitDraft, setSubmitDraft] = useState<SubmitDraft | null>(null);
   const [submitEvidenceUrl, setSubmitEvidenceUrl] = useState('');
+  const [submitArtifactUrl, setSubmitArtifactUrl] = useState('');
+  const [submitReflectionText, setSubmitReflectionText] = useState('');
   const [submitPayload, setSubmitPayload] = useState('');
   const [submittingAttempt, setSubmittingAttempt] = useState(false);
 
@@ -418,10 +424,26 @@ export default function TopToolsDrawer({
       } catch {
         setProgressSummary(null);
       }
+
+      try {
+        const game = await progressApi.getGamification(token, resolvedStudentEnrollment.enrollmentId);
+        setGamification(game || null);
+      } catch {
+        setGamification(null);
+      }
+
+      try {
+        const board = await progressApi.getLeaderboard(token, resolvedStudentEnrollment.enrollmentId, 10);
+        setLeaderboard(board || null);
+      } catch {
+        setLeaderboard(null);
+      }
     } catch (error: any) {
       setStudentError(error?.message || 'Failed to load roadmap tools.');
       setRoadmapData(null);
       setProgressSummary(null);
+      setGamification(null);
+      setLeaderboard(null);
     } finally {
       setStudentLoading(false);
     }
@@ -694,6 +716,8 @@ export default function TopToolsDrawer({
 
     setSubmitDraft({ taskId: task.id, attemptNo, taskTitle: task.title || 'Task' });
     setSubmitEvidenceUrl('');
+    setSubmitArtifactUrl('');
+    setSubmitReflectionText('');
     setSubmitPayload('');
   };
 
@@ -722,6 +746,8 @@ export default function TopToolsDrawer({
         submitDraft.attemptNo,
         {
           evidence_url: submitEvidenceUrl.trim() || undefined,
+          artifact_url: submitArtifactUrl.trim() || undefined,
+          reflection_text: submitReflectionText.trim() || undefined,
           payload: parsedPayload,
         }
       );
@@ -1375,6 +1401,21 @@ export default function TopToolsDrawer({
                                                   : '--'}
                                               </p>
                                               {latestResult.feedback && <p className="mt-1">Feedback: {latestResult.feedback}</p>}
+                                              {latestResult.rubric_scores_json && typeof latestResult.rubric_scores_json === 'object' && (
+                                                <div className="mt-2">
+                                                  <p className="font-semibold text-gray-700">Rubric breakdown</p>
+                                                  <div className="mt-1 flex flex-wrap gap-2">
+                                                    {Object.entries(latestResult.rubric_scores_json).map(([criterion, value]) => (
+                                                      <span
+                                                        key={criterion}
+                                                        className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] text-gray-700"
+                                                      >
+                                                        {criterion}: {String(value)}
+                                                      </span>
+                                                    ))}
+                                                  </div>
+                                                </div>
+                                              )}
                                             </div>
                                           )}
                                         </div>
@@ -1389,6 +1430,98 @@ export default function TopToolsDrawer({
 
                         {studentTab === 'progress' && (
                           <div className="space-y-4">
+                            {gamification && (
+                              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                                <p className="text-xs uppercase tracking-[0.2em] text-amber-700">Gamification</p>
+                                <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                                  <div>
+                                    <p className="text-xs text-amber-700">Level</p>
+                                    <p className="text-2xl font-semibold text-amber-900">{gamification.level}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs text-amber-700">XP</p>
+                                    <p className="text-2xl font-semibold text-amber-900">{gamification.xp_total}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-xs text-amber-700">Streak</p>
+                                    <p className="text-2xl font-semibold text-amber-900">{gamification.streak_days}d</p>
+                                  </div>
+                                </div>
+                                <div className="mt-3">
+                                  <ProgressBar
+                                    value={
+                                      gamification.xp_to_next_level > 0
+                                        ? (gamification.xp_in_level / (gamification.xp_in_level + gamification.xp_to_next_level)) * 100
+                                        : 100
+                                    }
+                                  />
+                                  <p className="mt-1 text-xs text-amber-700">
+                                    {gamification.xp_in_level} XP in level • {gamification.xp_to_next_level} XP to next level
+                                  </p>
+                                </div>
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  {(gamification.badges || []).length === 0 ? (
+                                    <span className="text-xs text-amber-700">No badges yet. Keep learning to unlock them.</span>
+                                  ) : (
+                                    gamification.badges.map((badge) => (
+                                      <span
+                                        key={badge.id}
+                                        className="rounded-full border border-amber-300 bg-white px-3 py-1 text-xs font-semibold text-amber-800"
+                                        title={badge.description || badge.badge_code}
+                                      >
+                                        {badge.title}
+                                      </span>
+                                    ))
+                                  )}
+                                </div>
+                                {(gamification.recent_events || []).length > 0 && (
+                                  <div className="mt-3 rounded-xl border border-amber-200 bg-white p-2">
+                                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-700">Recent XP events</p>
+                                    <div className="mt-2 space-y-1">
+                                      {gamification.recent_events.slice(0, 5).map((event) => (
+                                        <div key={event.id} className="flex items-center justify-between text-xs text-amber-900">
+                                          <span>{event.reason || event.event_type}</span>
+                                          <span className="font-semibold">+{event.xp_delta} XP</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {leaderboard && (
+                              <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <p className="text-xs uppercase tracking-[0.2em] text-blue-700">Leaderboard</p>
+                                  <p className="text-xs text-blue-700">
+                                    Rank {leaderboard.viewer_rank || '-'} of {leaderboard.total_participants}
+                                  </p>
+                                </div>
+                                <div className="mt-3 space-y-2">
+                                  {(leaderboard.entries || []).slice(0, 10).map((entry) => (
+                                    <div
+                                      key={`${entry.enrollment_id}-${entry.rank}`}
+                                      className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs ${
+                                        entry.is_viewer
+                                          ? 'border-blue-300 bg-white text-blue-900'
+                                          : 'border-blue-100 bg-white/80 text-blue-800'
+                                      }`}
+                                    >
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-semibold">#{entry.rank}</span>
+                                        <span>{entry.display_name}</span>
+                                      </div>
+                                      <div className="flex items-center gap-3">
+                                        <span>{entry.level} lvl</span>
+                                        <span className="font-semibold">{entry.xp_total} XP</span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
                             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                               <div className="rounded-2xl border border-gray-200 bg-white p-4">
                                 <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Overall completion</p>
@@ -2169,6 +2302,27 @@ export default function TopToolsDrawer({
                   value={submitEvidenceUrl}
                   onChange={(event) => setSubmitEvidenceUrl(event.target.value)}
                   placeholder="https://..."
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">Artifact URL</label>
+                <input
+                  value={submitArtifactUrl}
+                  onChange={(event) => setSubmitArtifactUrl(event.target.value)}
+                  placeholder="https://... (report, repo, demo link)"
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">Reflection</label>
+                <textarea
+                  value={submitReflectionText}
+                  onChange={(event) => setSubmitReflectionText(event.target.value)}
+                  rows={3}
+                  placeholder="Explain your approach, choices, and what you learned."
                   className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
                 />
               </div>

@@ -551,6 +551,9 @@ class AssessmentTaskType(str, enum.Enum):
     assignment = "assignment"
     lab = "lab"
     project = "project"
+    case_study = "case_study"
+    simulation = "simulation"
+    field_task = "field_task"
     reflection = "reflection"
     presentation = "presentation"
     peer_review = "peer_review"
@@ -743,6 +746,13 @@ class RoadmapAssessmentTask(Base):
 
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Practical-learning scaffolding fields (optional for non-practical tasks)
+    practical_brief: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    required_tools: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    expected_artifact: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    safety_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rubric_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
     max_score: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, server_default="100")
     weight: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
 
@@ -899,6 +909,11 @@ class EnrollmentTaskResult(Base):
     feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     evidence_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Practical evidence and rubric scoring metadata
+    artifact_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reflection_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rubric_scores_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -914,4 +929,105 @@ class EnrollmentTaskResult(Base):
         Index("idx_enrollment_task_task", "task_id"),
         Index("idx_enrollment_task_grader", "graded_by_user_id"),
         Index("idx_enrollment_task_status", "status"),
+    )
+
+
+# -----------------------------
+# student_gamification_profiles
+# -----------------------------
+class StudentGamificationProfile(Base):
+    __tablename__ = "student_gamification_profiles"
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    xp_total: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    level: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    streak_days: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_activity_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    user: Mapped["User"] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("xp_total >= 0", name="gamification_profile_xp_nonneg"),
+        CheckConstraint("level >= 1", name="gamification_profile_level_min_1"),
+        CheckConstraint("streak_days >= 0", name="gamification_profile_streak_nonneg"),
+    )
+
+
+# -----------------------------
+# student_badges
+# -----------------------------
+class StudentBadge(Base):
+    __tablename__ = "student_badges"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    badge_code: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    awarded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    user: Mapped["User"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "badge_code", name="uq_student_badge_user_code"),
+        CheckConstraint("length(trim(badge_code)) > 0", name="student_badges_code_not_empty"),
+        CheckConstraint("length(trim(title)) > 0", name="student_badges_title_not_empty"),
+        Index("idx_student_badges_user", "user_id"),
+        Index("idx_student_badges_code", "badge_code"),
+    )
+
+
+# -----------------------------
+# xp_events
+# -----------------------------
+class XpEvent(Base):
+    __tablename__ = "xp_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+
+    user_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    enrollment_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("enrollments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    xp_delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    user: Mapped["User"] = relationship()
+    enrollment: Mapped[Optional["Enrollment"]] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("length(trim(event_type)) > 0", name="xp_events_type_not_empty"),
+        CheckConstraint("xp_delta <> 0", name="xp_events_delta_nonzero"),
+        Index("idx_xp_events_user", "user_id"),
+        Index("idx_xp_events_enrollment", "enrollment_id"),
+        Index("idx_xp_events_type", "event_type"),
     )

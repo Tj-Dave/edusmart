@@ -60,8 +60,23 @@ interface TaskResultRow {
   status?: string;
   score?: number | null;
   feedback?: string | null;
+  evidenceUrl?: string | null;
+  artifactUrl?: string | null;
+  reflectionText?: string | null;
+  rubricScores?: Record<string, number> | null;
   submittedAt?: string | null;
   gradedAt?: string | null;
+}
+
+interface GradeDraft {
+  score: string;
+  feedback: string;
+  rubric_scores: string;
+}
+
+interface RubricRowDraft {
+  criterion: string;
+  value: string;
 }
 
 interface TaskRow {
@@ -69,6 +84,11 @@ interface TaskRow {
   title: string;
   description: string;
   taskType: string;
+  practicalBrief?: string | null;
+  requiredTools?: string | null;
+  expectedArtifact?: string | null;
+  safetyNotes?: string | null;
+  rubricJson?: Record<string, unknown> | null;
   dueAt?: string | null;
   maxAttempts: number;
   attemptScoringRule: string;
@@ -114,6 +134,11 @@ interface TaskDraft {
   title: string;
   description: string;
   task_type: string;
+  practical_brief: string;
+  required_tools: string;
+  expected_artifact: string;
+  safety_notes: string;
+  rubric_json: string;
   due_at: string;
   max_attempts: string;
   allow_late_submission: boolean;
@@ -122,13 +147,14 @@ interface TaskDraft {
   weight: string;
 }
 
-type LecturerTab = 'dashboard' | 'offerings' | 'roadmap' | 'students' | 'uploads' | 'assistant';
+type LecturerTab = 'dashboard' | 'offerings' | 'roadmap' | 'students' | 'assessments' | 'uploads' | 'assistant';
 
-const TABS: Array<{ id: LecturerTab; label: string }> = [
+const BASE_TABS: Array<{ id: LecturerTab; label: string }> = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'offerings', label: 'Offerings' },
   { id: 'roadmap', label: 'Roadmap Builder' },
   { id: 'students', label: 'Students' },
+  { id: 'assessments', label: 'Assessments' },
   { id: 'uploads', label: 'Uploads' },
   { id: 'assistant', label: 'AI Assistant' },
 ];
@@ -137,6 +163,11 @@ const defaultTaskDraft = (): TaskDraft => ({
   title: '',
   description: '',
   task_type: 'assignment',
+  practical_brief: '',
+  required_tools: '',
+  expected_artifact: '',
+  safety_notes: '',
+  rubric_json: '',
   due_at: '',
   max_attempts: '1',
   allow_late_submission: false,
@@ -154,6 +185,124 @@ const asNumber = (value: unknown): number | null => {
   if (value === null || value === undefined || value === '') return null;
   const next = Number(value);
   return Number.isFinite(next) ? next : null;
+};
+
+const TASK_TYPE_OPTIONS = [
+  'quiz',
+  'assignment',
+  'lab',
+  'project',
+  'case_study',
+  'simulation',
+  'field_task',
+  'reflection',
+  'presentation',
+  'peer_review',
+  'other',
+];
+
+const defaultGradeDraft = (): GradeDraft => ({
+  score: '',
+  feedback: '',
+  rubric_scores: '',
+});
+
+const parseOptionalJsonObject = (value: string): Record<string, unknown> | null => {
+  const raw = value.trim();
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Rubric JSON must be a JSON object.');
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    throw new Error('Rubric JSON is invalid. Provide a valid JSON object.');
+  }
+};
+
+const parseOptionalRubricScores = (value: string): Record<string, number> | null => {
+  const raw = value.trim();
+  if (!raw) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('Rubric scores must be valid JSON.');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Rubric scores must be a JSON object.');
+  }
+
+  const out: Record<string, number> = {};
+  for (const [key, valueEntry] of Object.entries(parsed as Record<string, unknown>)) {
+    const numeric = Number(valueEntry);
+    if (!Number.isFinite(numeric)) {
+      throw new Error(`Rubric score for "${key}" must be numeric.`);
+    }
+    out[key] = numeric;
+  }
+
+  return out;
+};
+
+const rubricRowsFromJsonText = (value: string): RubricRowDraft[] => {
+  const raw = value.trim();
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    return Object.entries(parsed as Record<string, unknown>).map(([criterion, numeric]) => ({
+      criterion,
+      value: numeric === null || numeric === undefined ? '' : String(numeric),
+    }));
+  } catch {
+    return [];
+  }
+};
+
+const rubricJsonTextFromRows = (rows: RubricRowDraft[]): string => {
+  const out: Record<string, number> = {};
+  for (const row of rows) {
+    const key = row.criterion.trim();
+    const numeric = Number(row.value);
+    if (!key || !Number.isFinite(numeric)) continue;
+    out[key] = numeric;
+  }
+  if (Object.keys(out).length === 0) return '';
+  return JSON.stringify(out, null, 2);
+};
+
+const setRubricRowField = (
+  jsonText: string,
+  rowIndex: number,
+  field: keyof RubricRowDraft,
+  value: string
+): string => {
+  const rows = rubricRowsFromJsonText(jsonText);
+  while (rows.length <= rowIndex) {
+    rows.push({ criterion: '', value: '' });
+  }
+  rows[rowIndex] = {
+    ...rows[rowIndex],
+    [field]: value,
+  };
+  return rubricJsonTextFromRows(rows);
+};
+
+const addRubricRow = (jsonText: string): string => {
+  const rows = rubricRowsFromJsonText(jsonText);
+  rows.push({ criterion: `criterion_${rows.length + 1}`, value: '0' });
+  return rubricJsonTextFromRows(rows);
+};
+
+const removeRubricRow = (jsonText: string, rowIndex: number): string => {
+  const rows = rubricRowsFromJsonText(jsonText).filter((_, index) => index !== rowIndex);
+  return rubricJsonTextFromRows(rows);
 };
 
 const parseRows = <T,>(raw: unknown, keys: string[]): T[] => {
@@ -218,6 +367,10 @@ const normalizeTaskResult = (raw: any): TaskResultRow => ({
   status: raw?.status || undefined,
   score: asNumber(raw?.score),
   feedback: raw?.feedback || null,
+  evidenceUrl: raw?.evidence_url || null,
+  artifactUrl: raw?.artifact_url || null,
+  reflectionText: raw?.reflection_text || null,
+  rubricScores: raw?.rubric_scores_json && typeof raw?.rubric_scores_json === 'object' ? raw.rubric_scores_json : null,
   submittedAt: raw?.submitted_at || null,
   gradedAt: raw?.graded_at || null,
 });
@@ -227,6 +380,11 @@ const normalizeTask = (raw: any): TaskRow => ({
   title: raw?.title || raw?.name || 'Untitled task',
   description: raw?.description || '',
   taskType: raw?.task_type || raw?.type || 'assignment',
+  practicalBrief: raw?.practical_brief || null,
+  requiredTools: raw?.required_tools || null,
+  expectedArtifact: raw?.expected_artifact || null,
+  safetyNotes: raw?.safety_notes || null,
+  rubricJson: raw?.rubric_json && typeof raw?.rubric_json === 'object' ? raw.rubric_json : null,
   dueAt: raw?.due_at || null,
   maxAttempts: asNumber(raw?.max_attempts) || 1,
   attemptScoringRule: raw?.attempt_scoring_rule || 'latest',
@@ -392,6 +550,9 @@ export default function LecturerWorkspacePage() {
   const [studentRows, setStudentRows] = useState<StudentSummaryRow[]>([]);
   const [selectedStudentEnrollmentId, setSelectedStudentEnrollmentId] = useState('');
   const [studentRoadmapByEnrollment, setStudentRoadmapByEnrollment] = useState<Record<string, ParsedRoadmap>>({});
+  const [assessmentStatusFilter, setAssessmentStatusFilter] = useState<'all' | 'submitted' | 'graded' | 'in_progress' | 'not_started'>('submitted');
+  const [gradingByAttempt, setGradingByAttempt] = useState<Record<string, boolean>>({});
+  const [gradeDraftByAttempt, setGradeDraftByAttempt] = useState<Record<string, GradeDraft>>({});
 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -410,6 +571,38 @@ export default function LecturerWorkspacePage() {
   const selectedStudentRoadmap = selectedStudentEnrollmentId
     ? studentRoadmapByEnrollment[selectedStudentEnrollmentId] || null
     : null;
+
+  const selectedStudentSummary = selectedStudentEnrollmentId
+    ? studentRows.find((row) => row.enrollmentId === selectedStudentEnrollmentId) || null
+    : null;
+
+  const pendingAssessmentCount = useMemo(() => {
+    let count = 0;
+    for (const roadmap of Object.values(studentRoadmapByEnrollment)) {
+      for (const item of roadmap.items || []) {
+        for (const task of item.tasks || []) {
+          for (const attempt of task.results || []) {
+            if ((attempt.status || '').toLowerCase() === 'submitted') {
+              count += 1;
+            }
+          }
+        }
+      }
+    }
+    return count;
+  }, [studentRoadmapByEnrollment]);
+
+  const tabsForRender = useMemo(
+    () =>
+      BASE_TABS.map((tab) => {
+        if (tab.id !== 'assessments') return tab;
+        return {
+          ...tab,
+          label: pendingAssessmentCount > 0 ? `Assessments (${pendingAssessmentCount})` : 'Assessments',
+        };
+      }),
+    [pendingAssessmentCount]
+  );
 
   const isLecturerSurface = user?.role === 'lecturer' || user?.role === 'admin';
 
@@ -863,11 +1056,24 @@ export default function LecturerWorkspacePage() {
       return;
     }
 
+    let rubricJson: Record<string, unknown> | null = null;
+    try {
+      rubricJson = parseOptionalJsonObject(draft.rubric_json);
+    } catch (error: any) {
+      setRoadmapError(error?.message || 'Rubric JSON is invalid.');
+      return;
+    }
+
     try {
       await roadmapAdminApi.createTask(token, itemId, {
         title: draft.title.trim(),
         description: draft.description.trim() || undefined,
         task_type: draft.task_type || undefined,
+        practical_brief: draft.practical_brief.trim() || undefined,
+        required_tools: draft.required_tools.trim() || undefined,
+        expected_artifact: draft.expected_artifact.trim() || undefined,
+        safety_notes: draft.safety_notes.trim() || undefined,
+        rubric_json: rubricJson || undefined,
         due_at: draft.due_at || undefined,
         max_attempts: asNumber(draft.max_attempts) || 1,
         allow_late_submission: draft.allow_late_submission,
@@ -894,6 +1100,11 @@ export default function LecturerWorkspacePage() {
       title: task.title,
       description: task.description,
       task_type: task.taskType,
+      practical_brief: task.practicalBrief || '',
+      required_tools: task.requiredTools || '',
+      expected_artifact: task.expectedArtifact || '',
+      safety_notes: task.safetyNotes || '',
+      rubric_json: task.rubricJson ? JSON.stringify(task.rubricJson, null, 2) : '',
       due_at: task.dueAt ? String(task.dueAt).slice(0, 16) : '',
       max_attempts: String(task.maxAttempts),
       allow_late_submission: task.allowLateSubmission,
@@ -919,11 +1130,24 @@ export default function LecturerWorkspacePage() {
 
     const draft = getTaskEditDraft(task);
 
+    let rubricJson: Record<string, unknown> | null = null;
+    try {
+      rubricJson = parseOptionalJsonObject(draft.rubric_json);
+    } catch (error: any) {
+      setRoadmapError(error?.message || 'Rubric JSON is invalid.');
+      return;
+    }
+
     try {
       await roadmapAdminApi.updateTask(token, task.id, {
         title: draft.title.trim(),
         description: draft.description.trim() || undefined,
         task_type: draft.task_type || undefined,
+        practical_brief: draft.practical_brief.trim() || undefined,
+        required_tools: draft.required_tools.trim() || undefined,
+        expected_artifact: draft.expected_artifact.trim() || undefined,
+        safety_notes: draft.safety_notes.trim() || undefined,
+        rubric_json: rubricJson || undefined,
         due_at: draft.due_at || undefined,
         max_attempts: asNumber(draft.max_attempts) || 1,
         allow_late_submission: draft.allow_late_submission,
@@ -1040,10 +1264,83 @@ export default function LecturerWorkspacePage() {
   };
 
   useEffect(() => {
-    if (activeTab !== 'students') return;
+    if (activeTab !== 'students' && activeTab !== 'assessments') return;
     loadStudents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, selectedOfferingId]);
+
+  const attemptKey = (enrollmentId: string, taskId: string, attemptNo?: number) =>
+    `${enrollmentId}:${taskId}:${attemptNo ?? 0}`;
+
+  const getGradeDraft = (enrollmentId: string, taskId: string, attempt: TaskResultRow): GradeDraft => {
+    const key = attemptKey(enrollmentId, taskId, attempt.attemptNo);
+    const existing = gradeDraftByAttempt[key];
+    if (existing) return existing;
+
+    return {
+      score: attempt.score !== null && attempt.score !== undefined ? String(attempt.score) : '',
+      feedback: attempt.feedback || '',
+      rubric_scores: attempt.rubricScores ? JSON.stringify(attempt.rubricScores, null, 2) : '',
+    };
+  };
+
+  const setGradeDraftField = <K extends keyof GradeDraft>(
+    enrollmentId: string,
+    taskId: string,
+    attemptNo: number | undefined,
+    field: K,
+    value: GradeDraft[K]
+  ) => {
+    const key = attemptKey(enrollmentId, taskId, attemptNo);
+    const current = gradeDraftByAttempt[key] || defaultGradeDraft();
+    setGradeDraftByAttempt((prev) => ({
+      ...prev,
+      [key]: {
+        ...current,
+        [field]: value,
+      },
+    }));
+  };
+
+  const gradeAttempt = async (
+    enrollmentId: string,
+    taskId: string,
+    attempt: TaskResultRow
+  ) => {
+    if (!token || attempt.attemptNo === undefined || attempt.attemptNo === null) return;
+
+    const key = attemptKey(enrollmentId, taskId, attempt.attemptNo);
+    const draft = getGradeDraft(enrollmentId, taskId, attempt);
+    const score = asNumber(draft.score);
+    if (score === null) {
+      setStudentsError('Score is required and must be numeric.');
+      return;
+    }
+
+    let rubricScores: Record<string, number> | null = null;
+    try {
+      rubricScores = parseOptionalRubricScores(draft.rubric_scores);
+    } catch (error: any) {
+      setStudentsError(error?.message || 'Rubric scores are invalid.');
+      return;
+    }
+
+    setGradingByAttempt((prev) => ({ ...prev, [key]: true }));
+    setStudentsError(null);
+
+    try {
+      await progressApi.gradeAttempt(token, enrollmentId, taskId, attempt.attemptNo, {
+        score,
+        feedback: draft.feedback.trim() || undefined,
+        rubric_scores: rubricScores || undefined,
+      });
+      await loadStudents();
+    } catch (requestError: any) {
+      setStudentsError(requestError?.message || 'Failed to grade attempt.');
+    } finally {
+      setGradingByAttempt((prev) => ({ ...prev, [key]: false }));
+    }
+  };
 
   const loadUploadHistory = async () => {
     if (!token || !isLecturerSurface) return;
@@ -1157,7 +1454,7 @@ export default function LecturerWorkspacePage() {
         <InlineErrorBanner message={activeTab === 'offerings' ? offeringsError : null} />
         <InlineErrorBanner message={activeTab === 'offerings' ? coursesError : null} />
 
-        <WorkspaceTabs tabs={TABS} activeTab={activeTab} onChange={(tab) => setActiveTab(tab as LecturerTab)} />
+        <WorkspaceTabs tabs={tabsForRender} activeTab={activeTab} onChange={(tab) => setActiveTab(tab as LecturerTab)} />
 
         <SectionCard
           title="Offering Context"
@@ -1663,6 +1960,60 @@ export default function LecturerWorkspacePage() {
 
                                     return (
                                       <div key={task.id} className="rounded-2xl border border-gray-200 bg-gray-50 p-3">
+                                        {/** Visual rubric builder (keeps JSON payload contract). */}
+                                        {(() => {
+                                          const rubricRows = rubricRowsFromJsonText(draft.rubric_json);
+                                          return (
+                                            <div className="mt-2 rounded-xl border border-gray-200 bg-white p-2">
+                                              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Rubric Builder</p>
+                                              <div className="mt-2 space-y-2">
+                                                {rubricRows.map((row, rubricIndex) => (
+                                                  <div key={`task-edit-rubric-${task.id}-${rubricIndex}`} className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_120px_auto]">
+                                                    <input
+                                                      value={row.criterion}
+                                                      onChange={(event) =>
+                                                        setTaskEditDraftField(
+                                                          task,
+                                                          'rubric_json',
+                                                          setRubricRowField(draft.rubric_json, rubricIndex, 'criterion', event.target.value)
+                                                        )
+                                                      }
+                                                      placeholder="Criterion (e.g. correctness)"
+                                                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                                    />
+                                                    <input
+                                                      value={row.value}
+                                                      onChange={(event) =>
+                                                        setTaskEditDraftField(
+                                                          task,
+                                                          'rubric_json',
+                                                          setRubricRowField(draft.rubric_json, rubricIndex, 'value', event.target.value)
+                                                        )
+                                                      }
+                                                      placeholder="Weight"
+                                                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                                    />
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => setTaskEditDraftField(task, 'rubric_json', removeRubricRow(draft.rubric_json, rubricIndex))}
+                                                      className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50"
+                                                    >
+                                                      Remove
+                                                    </button>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                              <button
+                                                type="button"
+                                                onClick={() => setTaskEditDraftField(task, 'rubric_json', addRubricRow(draft.rubric_json))}
+                                                className="mt-2 rounded-xl border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100"
+                                              >
+                                                Add criterion
+                                              </button>
+                                            </div>
+                                          );
+                                        })()}
+
                                         <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
                                           <input
                                             value={draft.title}
@@ -1670,12 +2021,17 @@ export default function LecturerWorkspacePage() {
                                             placeholder="Task title"
                                             className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
                                           />
-                                          <input
+                                          <select
                                             value={draft.task_type}
                                             onChange={(event) => setTaskEditDraftField(task, 'task_type', event.target.value)}
-                                            placeholder="Task type"
                                             className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
+                                          >
+                                            {TASK_TYPE_OPTIONS.map((taskType) => (
+                                              <option key={taskType} value={taskType}>
+                                                {taskType}
+                                              </option>
+                                            ))}
+                                          </select>
                                           <input
                                             type="datetime-local"
                                             value={draft.due_at}
@@ -1722,6 +2078,41 @@ export default function LecturerWorkspacePage() {
                                           rows={2}
                                           placeholder="Task description"
                                           className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                        />
+                                        <textarea
+                                          value={draft.practical_brief}
+                                          onChange={(event) => setTaskEditDraftField(task, 'practical_brief', event.target.value)}
+                                          rows={2}
+                                          placeholder="Practical brief (objective, steps, deliverable context)"
+                                          className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                        />
+                                        <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                                          <input
+                                            value={draft.required_tools}
+                                            onChange={(event) => setTaskEditDraftField(task, 'required_tools', event.target.value)}
+                                            placeholder="Required tools or materials"
+                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                          />
+                                          <input
+                                            value={draft.expected_artifact}
+                                            onChange={(event) => setTaskEditDraftField(task, 'expected_artifact', event.target.value)}
+                                            placeholder="Expected artifact (report, repo, demo, etc.)"
+                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                          />
+                                        </div>
+                                        <textarea
+                                          value={draft.safety_notes}
+                                          onChange={(event) => setTaskEditDraftField(task, 'safety_notes', event.target.value)}
+                                          rows={2}
+                                          placeholder="Safety, ethics, or policy notes"
+                                          className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                        />
+                                        <textarea
+                                          value={draft.rubric_json}
+                                          onChange={(event) => setTaskEditDraftField(task, 'rubric_json', event.target.value)}
+                                          rows={3}
+                                          placeholder='Rubric JSON, e.g. {"correctness": 40, "process": 30, "reflection": 30}'
+                                          className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm font-mono"
                                         />
 
                                         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -1771,12 +2162,17 @@ export default function LecturerWorkspacePage() {
                                     placeholder="Title"
                                     className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
                                   />
-                                  <input
+                                  <select
                                     value={taskCreateDraft.task_type}
                                     onChange={(event) => setTaskCreateDraftField(item.id, 'task_type', event.target.value)}
-                                    placeholder="Type"
                                     className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
+                                  >
+                                    {TASK_TYPE_OPTIONS.map((taskType) => (
+                                      <option key={taskType} value={taskType}>
+                                        {taskType}
+                                      </option>
+                                    ))}
+                                  </select>
                                   <input
                                     type="datetime-local"
                                     value={taskCreateDraft.due_at}
@@ -1822,6 +2218,93 @@ export default function LecturerWorkspacePage() {
                                   rows={2}
                                   placeholder="Task description"
                                   className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                />
+                                <textarea
+                                  value={taskCreateDraft.practical_brief}
+                                  onChange={(event) => setTaskCreateDraftField(item.id, 'practical_brief', event.target.value)}
+                                  rows={2}
+                                  placeholder="Practical brief (objective, steps, deliverable context)"
+                                  className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                />
+                                <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                                  <input
+                                    value={taskCreateDraft.required_tools}
+                                    onChange={(event) => setTaskCreateDraftField(item.id, 'required_tools', event.target.value)}
+                                    placeholder="Required tools or materials"
+                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                  />
+                                  <input
+                                    value={taskCreateDraft.expected_artifact}
+                                    onChange={(event) => setTaskCreateDraftField(item.id, 'expected_artifact', event.target.value)}
+                                    placeholder="Expected artifact (report, repo, demo, etc.)"
+                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                  />
+                                </div>
+                                <textarea
+                                  value={taskCreateDraft.safety_notes}
+                                  onChange={(event) => setTaskCreateDraftField(item.id, 'safety_notes', event.target.value)}
+                                  rows={2}
+                                  placeholder="Safety, ethics, or policy notes"
+                                  className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                />
+                                {(() => {
+                                  const rubricRows = rubricRowsFromJsonText(taskCreateDraft.rubric_json);
+                                  return (
+                                    <div className="mt-2 rounded-xl border border-gray-200 bg-white p-2">
+                                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Rubric Builder</p>
+                                      <div className="mt-2 space-y-2">
+                                        {rubricRows.map((row, rubricIndex) => (
+                                          <div key={`task-create-rubric-${item.id}-${rubricIndex}`} className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_120px_auto]">
+                                            <input
+                                              value={row.criterion}
+                                              onChange={(event) =>
+                                                setTaskCreateDraftField(
+                                                  item.id,
+                                                  'rubric_json',
+                                                  setRubricRowField(taskCreateDraft.rubric_json, rubricIndex, 'criterion', event.target.value)
+                                                )
+                                              }
+                                              placeholder="Criterion (e.g. correctness)"
+                                              className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                            />
+                                            <input
+                                              value={row.value}
+                                              onChange={(event) =>
+                                                setTaskCreateDraftField(
+                                                  item.id,
+                                                  'rubric_json',
+                                                  setRubricRowField(taskCreateDraft.rubric_json, rubricIndex, 'value', event.target.value)
+                                                )
+                                              }
+                                              placeholder="Weight"
+                                              className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
+                                            />
+                                            <button
+                                              type="button"
+                                              onClick={() => setTaskCreateDraftField(item.id, 'rubric_json', removeRubricRow(taskCreateDraft.rubric_json, rubricIndex))}
+                                              className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50"
+                                            >
+                                              Remove
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => setTaskCreateDraftField(item.id, 'rubric_json', addRubricRow(taskCreateDraft.rubric_json))}
+                                        className="mt-2 rounded-xl border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100"
+                                      >
+                                        Add criterion
+                                      </button>
+                                    </div>
+                                  );
+                                })()}
+                                <textarea
+                                  value={taskCreateDraft.rubric_json}
+                                  onChange={(event) => setTaskCreateDraftField(item.id, 'rubric_json', event.target.value)}
+                                  rows={3}
+                                  placeholder='Rubric JSON, e.g. {"correctness": 40, "process": 30, "reflection": 30}'
+                                  className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm font-mono"
                                 />
                                 <button
                                   type="button"
@@ -1930,19 +2413,301 @@ export default function LecturerWorkspacePage() {
                             <div className="mt-2 space-y-2">
                               {item.tasks.map((task) => (
                                 <div key={task.id} className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs">
-                                  <p className="font-semibold text-gray-800">{task.title}</p>
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <p className="font-semibold text-gray-800">{task.title}</p>
+                                    <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] text-gray-600">
+                                      {task.taskType}
+                                    </span>
+                                  </div>
                                   <p className="text-gray-500">Attempts: {task.results.length}/{task.maxAttempts}</p>
-                                  {task.results.length > 0 && (
+                                  {task.results.length > 0 ? (
                                     <p className="text-gray-500">
-                                      Latest: #{task.results[task.results.length - 1]?.attemptNo || '-'} • Score{' '}
-                                      {task.results[task.results.length - 1]?.score ?? '--'}
+                                      Latest: #{task.results[task.results.length - 1]?.attemptNo || '-'} • Score {task.results[task.results.length - 1]?.score ?? '--'}
                                     </p>
+                                  ) : (
+                                    <p className="text-gray-500">No attempts submitted yet.</p>
                                   )}
                                 </div>
                               ))}
                             </div>
+                            <button
+                              type="button"
+                              onClick={() => goToTab('assessments')}
+                              className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                            >
+                              Open Assessments Tab
+                            </button>
                           </div>
                         ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </SectionCard>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'assessments' && (
+          <div className="space-y-4">
+            <InlineErrorBanner message={studentsError} />
+
+            {!selectedOffering ? (
+              <SectionCard title="Assessments" description="Select an offering to grade student attempts.">
+                <p className="text-sm text-gray-500">No offering selected.</p>
+              </SectionCard>
+            ) : (
+              <SectionCard
+                title="Assessment & Grading"
+                description="Lecturer grading workspace for practical and theory tasks."
+                actions={
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={assessmentStatusFilter}
+                      onChange={(event) => setAssessmentStatusFilter(event.target.value as 'all' | 'submitted' | 'graded' | 'in_progress' | 'not_started')}
+                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
+                    >
+                      <option value="submitted">Submitted</option>
+                      <option value="all">All statuses</option>
+                      <option value="graded">Graded</option>
+                      <option value="in_progress">In progress</option>
+                      <option value="not_started">Not started</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={loadStudents}
+                      disabled={studentsLoading}
+                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      {studentsLoading ? 'Refreshing...' : 'Refresh'}
+                    </button>
+                  </div>
+                }
+              >
+                {studentsLoading ? (
+                  <p className="text-sm text-gray-500">Loading assessment data...</p>
+                ) : studentRows.length === 0 ? (
+                  <p className="text-sm text-gray-500">No students found for this offering.</p>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_1.3fr]">
+                    <div className="overflow-x-auto rounded-2xl border border-gray-200">
+                      <table className="min-w-full bg-white text-sm">
+                        <thead className="bg-gray-50 text-gray-600">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-semibold">Student</th>
+                            <th className="px-3 py-2 text-left font-semibold">Progress</th>
+                            <th className="px-3 py-2 text-left font-semibold">Avg score</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {studentRows.map((row) => (
+                            <tr
+                              key={`assessment-${row.enrollmentId}`}
+                              onClick={() => setSelectedStudentEnrollmentId(row.enrollmentId)}
+                              className={`cursor-pointer border-t transition ${
+                                selectedStudentEnrollmentId === row.enrollmentId
+                                  ? 'bg-blue-50'
+                                  : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-3 py-2">
+                                <p className="font-semibold text-gray-900">{row.fullName}</p>
+                                <p className="text-xs text-gray-500">{row.email || row.enrollmentId}</p>
+                              </td>
+                              <td className="px-3 py-2">{row.progressPercent.toFixed(0)}%</td>
+                              <td className="px-3 py-2">{row.avgScore !== null && row.avgScore !== undefined ? row.avgScore.toFixed(1) : '--'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="space-y-3">
+                      {!selectedStudentRoadmap ? (
+                        <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-500">
+                          Select a student to view submitted attempts.
+                        </div>
+                      ) : (
+                        <>
+                          <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
+                            <p className="font-semibold text-gray-900">{selectedStudentSummary?.fullName || 'Selected student'}</p>
+                            <p className="text-xs text-gray-500">Enrollment: {selectedStudentEnrollmentId}</p>
+                          </div>
+
+                          {selectedStudentRoadmap.items.map((item) => (
+                            <div key={`assess-item-${item.id}`} className="rounded-2xl border border-gray-200 bg-gray-50 p-3">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="font-semibold text-gray-900">{item.title}</p>
+                                <StatusPill status={item.progress?.status || item.status} />
+                              </div>
+
+                              <div className="mt-2 space-y-2">
+                                {item.tasks.map((task) => {
+                                  const attempts = task.results.filter((attempt) => {
+                                    if (assessmentStatusFilter === 'all') return true;
+                                    return (attempt.status || '').toLowerCase() === assessmentStatusFilter;
+                                  });
+
+                                  if (attempts.length === 0) return null;
+
+                                  return (
+                                    <div key={`assess-task-${task.id}`} className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <p className="font-semibold text-gray-800">{task.title}</p>
+                                        <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] text-gray-600">
+                                          {task.taskType}
+                                        </span>
+                                      </div>
+
+                                      <div className="mt-2 space-y-2">
+                                        {attempts.map((attempt) => {
+                                          const key = attemptKey(selectedStudentEnrollmentId, task.id, attempt.attemptNo);
+                                          const draft = getGradeDraft(selectedStudentEnrollmentId, task.id, attempt);
+                                          const isBusy = Boolean(gradingByAttempt[key]);
+
+                                          return (
+                                            <div key={attempt.id || key} className="rounded-lg border border-gray-200 bg-gray-50 p-2">
+                                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                                <p className="font-medium text-gray-700">Attempt #{attempt.attemptNo || '-'}</p>
+                                                <StatusPill status={attempt.status || 'not_started'} />
+                                              </div>
+                                              <p className="mt-1 text-gray-500">
+                                                Submitted: {attempt.submittedAt ? new Date(attempt.submittedAt).toLocaleString() : 'Not submitted'}
+                                              </p>
+                                              <p className="text-gray-500">Current score: {attempt.score ?? '--'}</p>
+                                              {attempt.evidenceUrl && (
+                                                <a className="text-blue-600 underline" href={attempt.evidenceUrl} target="_blank" rel="noreferrer">
+                                                  Evidence
+                                                </a>
+                                              )}
+                                              {attempt.artifactUrl && (
+                                                <a className="ml-2 text-blue-600 underline" href={attempt.artifactUrl} target="_blank" rel="noreferrer">
+                                                  Artifact
+                                                </a>
+                                              )}
+                                              {attempt.reflectionText && (
+                                                <p className="mt-1 whitespace-pre-wrap text-gray-600">Reflection: {attempt.reflectionText}</p>
+                                              )}
+
+                                              <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+                                                <input
+                                                  value={draft.score}
+                                                  onChange={(event) => setGradeDraftField(selectedStudentEnrollmentId, task.id, attempt.attemptNo, 'score', event.target.value)}
+                                                  placeholder="Score"
+                                                  className="rounded-lg border border-gray-200 px-2 py-1 text-xs"
+                                                />
+                                                <textarea
+                                                  value={draft.feedback}
+                                                  onChange={(event) => setGradeDraftField(selectedStudentEnrollmentId, task.id, attempt.attemptNo, 'feedback', event.target.value)}
+                                                  rows={2}
+                                                  placeholder="Feedback"
+                                                  className="rounded-lg border border-gray-200 px-2 py-1 text-xs md:col-span-2"
+                                                />
+                                              </div>
+
+                                              <textarea
+                                                value={draft.rubric_scores}
+                                                onChange={(event) => setGradeDraftField(selectedStudentEnrollmentId, task.id, attempt.attemptNo, 'rubric_scores', event.target.value)}
+                                                rows={2}
+                                                placeholder='Rubric scores JSON, e.g. {"correctness": 34, "process": 27}'
+                                                className="mt-2 w-full rounded-lg border border-gray-200 px-2 py-1 text-xs font-mono"
+                                              />
+
+                                              {(() => {
+                                                const rubricRows = rubricRowsFromJsonText(draft.rubric_scores);
+                                                return (
+                                                  <div className="mt-2 rounded-lg border border-gray-200 bg-white p-2">
+                                                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-500">Rubric Scores Builder</p>
+                                                    <div className="mt-2 space-y-2">
+                                                      {rubricRows.map((row, rubricIndex) => (
+                                                        <div
+                                                          key={`grade-rubric-${selectedStudentEnrollmentId}-${task.id}-${attempt.attemptNo}-${rubricIndex}`}
+                                                          className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_120px_auto]"
+                                                        >
+                                                          <input
+                                                            value={row.criterion}
+                                                            onChange={(event) =>
+                                                              setGradeDraftField(
+                                                                selectedStudentEnrollmentId,
+                                                                task.id,
+                                                                attempt.attemptNo,
+                                                                'rubric_scores',
+                                                                setRubricRowField(draft.rubric_scores, rubricIndex, 'criterion', event.target.value)
+                                                              )
+                                                            }
+                                                            placeholder="Criterion"
+                                                            className="rounded-lg border border-gray-200 px-2 py-1 text-xs"
+                                                          />
+                                                          <input
+                                                            value={row.value}
+                                                            onChange={(event) =>
+                                                              setGradeDraftField(
+                                                                selectedStudentEnrollmentId,
+                                                                task.id,
+                                                                attempt.attemptNo,
+                                                                'rubric_scores',
+                                                                setRubricRowField(draft.rubric_scores, rubricIndex, 'value', event.target.value)
+                                                              )
+                                                            }
+                                                            placeholder="Score"
+                                                            className="rounded-lg border border-gray-200 px-2 py-1 text-xs"
+                                                          />
+                                                          <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                              setGradeDraftField(
+                                                                selectedStudentEnrollmentId,
+                                                                task.id,
+                                                                attempt.attemptNo,
+                                                                'rubric_scores',
+                                                                removeRubricRow(draft.rubric_scores, rubricIndex)
+                                                              )
+                                                            }
+                                                            className="rounded-lg border border-red-200 px-2 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50"
+                                                          >
+                                                            Remove
+                                                          </button>
+                                                        </div>
+                                                      ))}
+                                                    </div>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() =>
+                                                        setGradeDraftField(
+                                                          selectedStudentEnrollmentId,
+                                                          task.id,
+                                                          attempt.attemptNo,
+                                                          'rubric_scores',
+                                                          addRubricRow(draft.rubric_scores)
+                                                        )
+                                                      }
+                                                      className="mt-2 rounded-lg border border-gray-200 px-2 py-1 text-[11px] font-semibold text-gray-700 hover:bg-gray-100"
+                                                    >
+                                                      Add criterion
+                                                    </button>
+                                                  </div>
+                                                );
+                                              })()}
+
+                                              <button
+                                                type="button"
+                                                onClick={() => gradeAttempt(selectedStudentEnrollmentId, task.id, attempt)}
+                                                disabled={isBusy}
+                                                className="mt-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+                                              >
+                                                {isBusy ? 'Grading...' : 'Grade Attempt'}
+                                              </button>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        </>
                       )}
                     </div>
                   </div>

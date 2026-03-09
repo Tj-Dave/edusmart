@@ -26,6 +26,7 @@ from app.routes.course_specs import router as course_specs_router
 from app.routes.roadmap import router as roadmap_router
 from app.routes.assessments import router as assessments_router
 from app.routes.progress import router as progress_router
+from app.routes.gamification import router as gamification_router
 
 app = FastAPI(title="EduSmart Backend")
 
@@ -83,6 +84,7 @@ app.include_router(course_specs_router)
 app.include_router(roadmap_router)
 app.include_router(assessments_router)
 app.include_router(progress_router)
+app.include_router(gamification_router)
 
 @app.get("/health")
 def health():

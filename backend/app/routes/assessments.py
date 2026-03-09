@@ -115,6 +115,8 @@ def create_attempt_endpoint(
             task_id=task_id,
             actor=current_user,
             evidence_url=payload.evidence_url,
+            artifact_url=payload.artifact_url,
+            reflection_text=payload.reflection_text,
             payload=payload.payload,
         )
         return {"attempt": attempt, "progress": progress}
@@ -142,6 +144,8 @@ def submit_attempt_endpoint(
             attempt_no=attempt_no,
             actor=current_user,
             evidence_url=payload.evidence_url,
+            artifact_url=payload.artifact_url,
+            reflection_text=payload.reflection_text,
             payload=payload.payload,
         )
         return {"attempt": attempt, "progress": progress}
@@ -170,6 +174,7 @@ def grade_attempt_endpoint(
             actor=current_user,
             score=payload.score,
             feedback=payload.feedback,
+            rubric_scores=payload.rubric_scores,
         )
         return {"attempt": attempt, "progress": progress}
     except Exception as err:

@@ -108,3 +108,52 @@ export interface LecturerRoadmapResponse {
   roadmap_items?: RoadmapItem[];
   metadata?: Record<string, unknown>;
 }
+
+export interface GamificationBadge {
+  id: string;
+  badge_code: string;
+  title: string;
+  description?: string | null;
+  awarded_at?: string;
+}
+
+export interface GamificationXpEvent {
+  id: number;
+  event_type: string;
+  xp_delta: number;
+  reason?: string | null;
+  metadata_json?: Record<string, unknown> | null;
+  created_at?: string;
+}
+
+export interface GamificationOverview {
+  enrollment_id: string;
+  user_id: string;
+  xp_total: number;
+  level: number;
+  streak_days: number;
+  xp_in_level: number;
+  xp_to_next_level: number;
+  badges: GamificationBadge[];
+  recent_events: GamificationXpEvent[];
+}
+
+export interface LeaderboardEntry {
+  rank: number;
+  enrollment_id: string;
+  user_id: string;
+  display_name: string;
+  xp_total: number;
+  level: number;
+  streak_days: number;
+  is_viewer: boolean;
+}
+
+export interface OfferingLeaderboard {
+  offering_id: string;
+  enrollment_id: string;
+  viewer_user_id: string;
+  viewer_rank?: number | null;
+  total_participants: number;
+  entries: LeaderboardEntry[];
+}

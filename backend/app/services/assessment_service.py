@@ -25,8 +25,12 @@ from app.services.domain_errors import (
     ServiceValidationError,
 )
 from app.services.event_service import emit_enrollment_event, emit_event_for_offering_enrollments
+from app.services.gamification_service import award_xp_safe
 from app.services.progress_service import ensure_progress_rows_for_enrollment, recompute_item_progress
 from app.services.roadmap_service import refresh_assessment_task_count
+
+
+PRACTICAL_TASK_TYPES = {"lab", "project", "case_study", "simulation", "field_task"}
 
 
 def _now() -> datetime:
@@ -77,6 +81,63 @@ def _task_and_item_or_404(db: Session, task_id: UUID) -> tuple[RoadmapAssessment
     return task, item
 
 
+def _validate_rubric_json(rubric_json: Any, *, max_score: float | None = None) -> dict[str, float] | None:
+    if rubric_json is None:
+        return None
+    if not isinstance(rubric_json, dict):
+        raise ServiceValidationError("rubric_json must be an object with criterion weights")
+
+    out: dict[str, float] = {}
+    total = 0.0
+    for key, value in rubric_json.items():
+        criterion = str(key).strip()
+        if not criterion:
+            raise ServiceValidationError("rubric_json contains an empty criterion key")
+        try:
+            numeric = float(value)
+        except Exception as err:
+            raise ServiceValidationError(f"rubric_json value for '{criterion}' must be numeric") from err
+        if numeric < 0:
+            raise ServiceValidationError(f"rubric_json value for '{criterion}' must be >= 0")
+        out[criterion] = numeric
+        total += numeric
+
+    if max_score is not None and total > float(max_score):
+        raise ServiceValidationError("Sum of rubric_json weights cannot exceed max_score")
+
+    return out
+
+
+def _validate_rubric_scores(
+    rubric_scores: dict[str, float] | None,
+    *,
+    rubric_json: Any,
+    max_score: float,
+) -> dict[str, float] | None:
+    if rubric_scores is None:
+        return None
+    if not isinstance(rubric_scores, dict):
+        raise ServiceValidationError("rubric_scores must be an object")
+
+    normalized = _validate_rubric_json(rubric_scores, max_score=max_score)
+    if normalized is None:
+        return None
+
+    if isinstance(rubric_json, dict) and rubric_json:
+        rubric_weights = _validate_rubric_json(rubric_json, max_score=max_score) or {}
+        invalid = [k for k in normalized.keys() if k not in rubric_weights]
+        if invalid:
+            raise ServiceValidationError(f"rubric_scores contain unknown criteria: {', '.join(invalid)}")
+        for key, score_value in normalized.items():
+            max_criterion = float(rubric_weights[key])
+            if score_value > max_criterion:
+                raise ServiceValidationError(
+                    f"rubric_scores value for '{key}' cannot exceed rubric_json weight ({max_criterion})"
+                )
+
+    return normalized
+
+
 def create_task(
     db: Session,
     *,
@@ -89,12 +150,20 @@ def create_task(
         raise ServiceNotFoundError("Roadmap item not found")
     require_lecturer_or_admin_for_offering(db, offering_id=item.course_offering_id, actor=actor)
 
+    max_score = float(payload.get("max_score") or 100)
+    rubric_json = _validate_rubric_json(payload.get("rubric_json"), max_score=max_score)
+
     task = RoadmapAssessmentTask(
         roadmap_item_id=item.id,
         title=payload["title"],
         task_type=payload.get("task_type") or "quiz",
         description=payload.get("description"),
-        max_score=float(payload.get("max_score") or 100),
+        practical_brief=payload.get("practical_brief"),
+        required_tools=payload.get("required_tools"),
+        expected_artifact=payload.get("expected_artifact"),
+        safety_notes=payload.get("safety_notes"),
+        rubric_json=rubric_json,
+        max_score=max_score,
         weight=payload.get("weight"),
         due_at=payload.get("due_at"),
         is_required=bool(payload.get("is_required", True)),
@@ -135,6 +204,11 @@ def update_task(
         "title",
         "task_type",
         "description",
+        "practical_brief",
+        "required_tools",
+        "expected_artifact",
+        "safety_notes",
+        "rubric_json",
         "max_score",
         "weight",
         "due_at",
@@ -148,6 +222,8 @@ def update_task(
     ]:
         if field in payload and payload[field] is not None:
             setattr(task, field, payload[field])
+
+    task.rubric_json = _validate_rubric_json(task.rubric_json, max_score=float(task.max_score))
 
     if int(task.max_attempts) < 1:
         raise ServiceValidationError("max_attempts must be >= 1")
@@ -236,6 +312,8 @@ def create_attempt(
     task_id: UUID,
     actor: User,
     evidence_url: str | None = None,
+    artifact_url: str | None = None,
+    reflection_text: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> tuple[EnrollmentTaskResult, Any]:
     enrollment = require_student_owner_or_admin_for_enrollment(db, enrollment_id=enrollment_id, actor=actor)
@@ -265,6 +343,8 @@ def create_attempt(
         max_score_snapshot=float(task.max_score),
         weight_snapshot=task.weight,
         evidence_url=evidence_url,
+        artifact_url=artifact_url,
+        reflection_text=reflection_text,
     )
     if payload:
         attempt.feedback = f"payload={payload}"
@@ -278,6 +358,16 @@ def create_attempt(
         event_type="attempt_created",
         actor_user_id=str(actor.id),
         note={"task_id": str(task_id), "attempt_no": next_attempt_no},
+    )
+
+    award_xp_safe(
+        db,
+        user_id=enrollment.user_id,
+        enrollment_id=enrollment_id,
+        event_type="attempt_created",
+        xp_delta=5,
+        reason="Created assessment attempt",
+        metadata_json={"task_id": str(task_id), "attempt_no": next_attempt_no},
     )
 
     ensure_progress_rows_for_enrollment(db, enrollment_id=enrollment_id)
@@ -303,6 +393,8 @@ def submit_attempt(
     attempt_no: int,
     actor: User,
     evidence_url: str | None = None,
+    artifact_url: str | None = None,
+    reflection_text: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> tuple[EnrollmentTaskResult, Any]:
     enrollment = require_student_owner_or_admin_for_enrollment(db, enrollment_id=enrollment_id, actor=actor)
@@ -347,10 +439,19 @@ def submit_attempt(
         allow_late_submission=bool(task.allow_late_submission),
     )
 
+    task_type_value = task.task_type.value if hasattr(task.task_type, "value") else str(task.task_type)
+    effective_artifact = artifact_url if artifact_url is not None else attempt.artifact_url
+    if task_type_value in PRACTICAL_TASK_TYPES and not (effective_artifact and str(effective_artifact).strip()):
+        raise ServiceValidationError("artifact_url is required when submitting a practical task")
+
     attempt.status = EnrollmentTaskStatus.submitted
     attempt.submitted_at = now
     if evidence_url is not None:
         attempt.evidence_url = evidence_url
+    if artifact_url is not None:
+        attempt.artifact_url = artifact_url
+    if reflection_text is not None:
+        attempt.reflection_text = reflection_text
     if payload is not None:
         payload_text = f"payload={payload}"
         attempt.feedback = f"{attempt.feedback}\n{payload_text}".strip() if attempt.feedback else payload_text
@@ -362,6 +463,38 @@ def submit_attempt(
         actor_user_id=str(actor.id),
         note={"task_id": str(task_id), "attempt_no": attempt_no, "is_late": is_late},
     )
+
+    award_xp_safe(
+        db,
+        user_id=enrollment.user_id,
+        enrollment_id=enrollment_id,
+        event_type="attempt_submitted",
+        xp_delta=15,
+        reason="Submitted assessment attempt",
+        metadata_json={"task_id": str(task_id), "attempt_no": attempt_no, "is_late": is_late},
+    )
+
+    if task_type_value in PRACTICAL_TASK_TYPES and effective_artifact:
+        award_xp_safe(
+            db,
+            user_id=enrollment.user_id,
+            enrollment_id=enrollment_id,
+            event_type="practical_submit",
+            xp_delta=10,
+            reason="Submitted practical artifact",
+            metadata_json={"task_id": str(task_id), "attempt_no": attempt_no},
+        )
+
+    if reflection_text and len(reflection_text.strip()) >= 40:
+        award_xp_safe(
+            db,
+            user_id=enrollment.user_id,
+            enrollment_id=enrollment_id,
+            event_type="reflection_bonus",
+            xp_delta=10,
+            reason="Submitted reflective notes",
+            metadata_json={"task_id": str(task_id), "attempt_no": attempt_no},
+        )
 
     progress, _ = recompute_item_progress(
         db,
@@ -385,6 +518,7 @@ def grade_attempt(
     actor: User,
     score: float,
     feedback: str | None = None,
+    rubric_scores: dict[str, float] | None = None,
 ) -> tuple[EnrollmentTaskResult, Any]:
     enrollment = require_lecturer_or_admin_for_enrollment(db, enrollment_id=enrollment_id, actor=actor)
     task, item = _task_and_item_or_404(db, task_id)
@@ -423,12 +557,20 @@ def grade_attempt(
     effective = apply_late_penalty(raw, _to_float(task.late_penalty_percent) if is_late else None)
     effective = max(0.0, min(effective, max_snapshot))
 
+    normalized_rubric_scores = _validate_rubric_scores(
+        rubric_scores,
+        rubric_json=task.rubric_json,
+        max_score=max_snapshot,
+    )
+
     attempt.score = round(effective, 4)
     attempt.status = EnrollmentTaskStatus.graded
     attempt.graded_at = _now()
     attempt.graded_by_user_id = actor.id
     if feedback:
         attempt.feedback = feedback
+    if normalized_rubric_scores is not None:
+        attempt.rubric_scores_json = normalized_rubric_scores
     if is_late and task.late_penalty_percent is not None:
         penalty_note = f"Late penalty applied: {task.late_penalty_percent}% (raw={raw}, effective={effective:.4f})"
         attempt.feedback = f"{attempt.feedback}\n{penalty_note}".strip() if attempt.feedback else penalty_note
@@ -446,6 +588,27 @@ def grade_attempt(
             "is_late": is_late,
         },
     )
+
+    award_xp_safe(
+        db,
+        user_id=enrollment.user_id,
+        enrollment_id=enrollment_id,
+        event_type="attempt_graded",
+        xp_delta=5,
+        reason="Attempt graded by lecturer",
+        metadata_json={"task_id": str(task_id), "attempt_no": attempt_no, "effective_score": effective},
+    )
+
+    if effective >= 80:
+        award_xp_safe(
+            db,
+            user_id=enrollment.user_id,
+            enrollment_id=enrollment_id,
+            event_type="high_score_bonus",
+            xp_delta=10,
+            reason="High-scoring graded attempt",
+            metadata_json={"task_id": str(task_id), "attempt_no": attempt_no, "effective_score": effective},
+        )
 
     progress, _ = recompute_item_progress(
         db,
