@@ -33,7 +33,7 @@ async def extract_spec_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    llm_client = getattr(req.app.state, "llm_subclient", None)
+    llm_client = getattr(req.app.state, "llm_client", None)
     file_bytes = await file.read()
     try:
         spec, generated, _document = extract_course_spec_from_upload(
