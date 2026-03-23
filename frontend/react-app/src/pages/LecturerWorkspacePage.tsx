@@ -18,6 +18,8 @@ import InlineErrorBanner from '../components/tools/InlineErrorBanner';
 import ProgressBar from '../components/tools/ProgressBar';
 import ScoreChip from '../components/tools/ScoreChip';
 import StatusPill from '../components/tools/StatusPill';
+import RoadmapNode, { type RoadmapNodeData } from '../components/lecturer/RoadmapNode';
+import SpecVisualEditor, { type VisualSpecState } from '../components/lecturer/SpecVisualEditor';
 
 interface CourseRecord {
   code: string;
@@ -419,14 +421,25 @@ const normalizeRoadmapItem = (raw: any): RoadmapItemRow => ({
 });
 
 const parseRoadmap = (raw: unknown): ParsedRoadmap => {
-  const source = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-  const items = parseRows<any>(source?.items || source?.roadmap_items, ['items', 'roadmap_items'])
+  // The backend GET /offerings/{id}/roadmap returns a flat array — handle both shapes:
+  // shape A: flat array   [{ id, title, ... }, ...]          ← backend default
+  // shape B: wrapped obj  { items: [...], spec_id: ..., ... } ← extended response
+  const rawArray: any[] = Array.isArray(raw) ? raw : [];
+  const source = (raw && !Array.isArray(raw) && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+
+  // Gather items from whichever shape is present
+  const rawItems: any[] = rawArray.length > 0
+    ? rawArray
+    : parseRows<any>(source?.items || source?.roadmap_items, ['items', 'roadmap_items']);
+
+  const items = rawItems
     .map(normalizeRoadmapItem)
     .sort((left, right) => {
-      const leftOrder = left.orderIndex ?? Number.MAX_SAFE_INTEGER;
-      const rightOrder = right.orderIndex ?? Number.MAX_SAFE_INTEGER;
-      if (leftOrder === rightOrder) return left.title.localeCompare(right.title);
-      return leftOrder - rightOrder;
+      // Sort by week_no first (curriculum sequence), then order_index, then title
+      const leftKey = left.weekNo ?? left.orderIndex ?? Number.MAX_SAFE_INTEGER;
+      const rightKey = right.weekNo ?? right.orderIndex ?? Number.MAX_SAFE_INTEGER;
+      if (leftKey !== rightKey) return leftKey - rightKey;
+      return left.title.localeCompare(right.title);
     });
 
   const progressRows = parseRows<any>(source?.progress || source?.roadmap_progress, ['progress', 'roadmap_progress'])
@@ -528,6 +541,24 @@ export default function LecturerWorkspacePage() {
   const [customEnrollmentKey, setCustomEnrollmentKey] = useState('');
 
   const [roadmapFilter, setRoadmapFilter] = useState<'all' | 'draft' | 'approved_active'>('all');
+
+  // ── Spec editor mode ──────────────────────────────────────────────────────
+  type SpecEditorMode = 'visual' | 'json';
+  const [specEditorMode, setSpecEditorMode] = useState<SpecEditorMode>('visual');
+  const [visualSpec, setVisualSpec] = useState<VisualSpecState>({
+    header: { course_name: '', course_code: '', level: '', credit_units: '', prerequisites: '', description: '', rationale: '', aim: '', lectures: '', practicals: '' },
+    learning_outcomes: [],
+    assessment_plan: [],
+  });
+  const [specJsonError, setSpecJsonError] = useState<string | null>(null);
+
+  // ── Node canvas state ─────────────────────────────────────────────────────
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropId, setDropId] = useState<string | null>(null);
+  const [pendingReorder, setPendingReorder] = useState(false);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
   const [roadmapLoading, setRoadmapLoading] = useState(false);
   const [roadmapError, setRoadmapError] = useState<string | null>(null);
   const [roadmapNotice, setRoadmapNotice] = useState<string | null>(null);
@@ -536,6 +567,38 @@ export default function LecturerWorkspacePage() {
   const [specStatus, setSpecStatus] = useState<string | null>(null);
   const [specSourceFile, setSpecSourceFile] = useState<File | null>(null);
   const [specEditor, setSpecEditor] = useState('');
+
+  // Sync visualSpec whenever specEditor changes (e.g. after spec extraction or initial load)
+  useEffect(() => {
+    if (!specEditor.trim()) return;
+    try {
+      const parsed = JSON.parse(specEditor);
+      const h = parsed?.course_header || {};
+      setVisualSpec({
+        header: {
+          course_name: h.course_name || '',
+          course_code: h.course_code || '',
+          level: h.level || '',
+          credit_units: h.credit_units != null ? String(h.credit_units) : '',
+          prerequisites: Array.isArray(h.prerequisites)
+            ? h.prerequisites.join(', ')
+            : (h.prerequisites || ''),
+          description: h.description || '',
+          rationale: h.rationale || '',
+          aim: h.aim || '',
+          lectures: h.contact_hours?.lectures != null ? String(h.contact_hours.lectures) : '',
+          practicals: h.contact_hours?.practicals != null ? String(h.contact_hours.practicals) : '',
+        },
+        learning_outcomes: Array.isArray(parsed?.learning_outcomes) ? parsed.learning_outcomes : [],
+        assessment_plan: Array.isArray(parsed?.assessment_plan) ? parsed.assessment_plan : [],
+      });
+      setSpecJsonError(null);
+    } catch {
+      // Invalid JSON — don't wipe visual spec, just show the error on JSON tab
+      setSpecJsonError('Invalid JSON — fix in JSON Editor before saving');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [specEditor]);
 
   const [newItemTitle, setNewItemTitle] = useState('');
   const [newItemDescription, setNewItemDescription] = useState('');
@@ -851,7 +914,7 @@ export default function LecturerWorkspacePage() {
     }
   };
 
-  const loadRoadmap = async () => {
+  const loadRoadmap = async (filterOverride?: 'all' | 'draft' | 'approved_active') => {
     if (!token || !selectedOfferingId) {
       setRoadmapItems([]);
       return;
@@ -861,13 +924,29 @@ export default function LecturerWorkspacePage() {
     setRoadmapError(null);
 
     try {
-      const response = await roadmapAdminApi.listRoadmap(token, selectedOfferingId, roadmapFilter);
+      // Always fetch ALL items for the canvas (filter is only for display toggle, not data fetch)
+      const [response, currentSpec] = await Promise.all([
+        roadmapAdminApi.listRoadmap(token, selectedOfferingId, filterOverride ?? 'all'),
+        roadmapAdminApi.getCurrentSpec(token, selectedOfferingId).catch(() => null),
+      ]);
+
       const parsed = parseRoadmap(response);
       setRoadmapItems(parsed.items);
-      setSpecId(parsed.specId || null);
-      setSpecStatus(parsed.specStatus || null);
-      if (parsed.specJson) {
-        setSpecEditor(JSON.stringify(parsed.specJson, null, 2));
+
+      // Populate spec info — always update when spec changes (keyed by specId, not editor content)
+      if (currentSpec) {
+        const newSpecId = currentSpec.id?.toString() || null;
+        setSpecId(newSpecId);
+        setSpecStatus(currentSpec.status || null);
+        if (currentSpec.spec_json) {
+          setSpecEditor(JSON.stringify(currentSpec.spec_json, null, 2));
+        }
+      } else {
+        setSpecId(parsed.specId || null);
+        setSpecStatus(parsed.specStatus || null);
+        if (parsed.specJson) {
+          setSpecEditor(JSON.stringify(parsed.specJson, null, 2));
+        }
       }
     } catch (requestError: any) {
       setRoadmapItems([]);
@@ -933,16 +1012,23 @@ export default function LecturerWorkspacePage() {
   };
 
   const approveSpec = async () => {
-    if (!token || !specId) return;
+    if (!token || !specId || !selectedOfferingId) return;
 
     setRoadmapLoading(true);
+    setRoadmapError(null);
     try {
       await roadmapAdminApi.approveSpec(token, specId);
       setSpecStatus('approved_active');
-      setRoadmapNotice('Spec approved.');
+      setRoadmapNotice('Spec approved. Generating roadmap…');
+
+      // Auto-generate roadmap immediately after approval
+      await roadmapAdminApi.generateRoadmap(token, selectedOfferingId);
+      setRoadmapNotice('Spec approved ✓  Roadmap generated ✓');
+
       await loadRoadmap();
+      await refreshOfferings(false);
     } catch (requestError: any) {
-      setRoadmapError(requestError?.message || 'Failed to approve spec.');
+      setRoadmapError(requestError?.message || 'Failed to approve spec or generate roadmap.');
     } finally {
       setRoadmapLoading(false);
     }
@@ -1727,604 +1813,508 @@ export default function LecturerWorkspacePage() {
           </div>
         )}
 
-        {activeTab === 'roadmap' && (
-          <div className="space-y-4">
-            <InlineErrorBanner message={roadmapError} />
-            {roadmapNotice && (
-              <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
-                {roadmapNotice}
-              </div>
-            )}
+        {activeTab === 'roadmap' && (() => {
+          // ── helpers (inline, no new state needed) ────────────────────────────
+          const buildVisualSpec = (jsonStr: string): VisualSpecState => {
+            try {
+              const parsed = JSON.parse(jsonStr);
+              const h = parsed?.course_header || {};
+              return {
+                header: {
+                  course_name: h.course_name || '',
+                  course_code: h.course_code || '',
+                  level: h.level || '',
+                  credit_units: h.credit_units != null ? String(h.credit_units) : '',
+                  prerequisites: Array.isArray(h.prerequisites) ? h.prerequisites.join(', ') : (h.prerequisites || ''),
+                  description: h.description || '',
+                  rationale: h.rationale || '',
+                  aim: h.aim || '',
+                  lectures: h.contact_hours?.lectures != null ? String(h.contact_hours.lectures) : '',
+                  practicals: h.contact_hours?.practicals != null ? String(h.contact_hours.practicals) : '',
+                },
+                learning_outcomes: Array.isArray(parsed?.learning_outcomes) ? parsed.learning_outcomes : [],
+                assessment_plan: Array.isArray(parsed?.assessment_plan) ? parsed.assessment_plan : [],
+              };
+            } catch {
+              return visualSpec;
+            }
+          };
 
-            {!selectedOffering ? (
-              <SectionCard title="Roadmap Builder" description="Select an offering to begin roadmap design.">
-                <p className="text-sm text-gray-500">No offering selected.</p>
-              </SectionCard>
-            ) : (
-              <>
-                <SectionCard
-                  title="Roadmap Controls"
-                  description="Extract a spec, generate draft roadmap, and activate for students."
-                  actions={
-                    <select
-                      value={roadmapFilter}
-                      onChange={(event) => setRoadmapFilter(event.target.value as 'all' | 'draft' | 'approved_active')}
-                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
-                    >
-                      <option value="all">All items</option>
-                      <option value="draft">Draft items</option>
-                      <option value="approved_active">Active items</option>
-                    </select>
-                  }
-                >
-                  <div className="grid grid-cols-1 gap-2 md:grid-cols-2 lg:grid-cols-4">
-                    <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
-                      <input
-                        type="file"
-                        accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        className="hidden"
-                        onChange={(event) => {
-                          setSpecSourceFile(event.target.files?.[0] || null);
-                          setRoadmapError(null);
-                        }}
-                      />
-                      {specSourceFile ? 'Change document' : 'Choose PDF/DOCX'}
-                    </label>
-                    <button
-                      type="button"
-                      onClick={extractSpec}
-                      disabled={!specSourceFile || roadmapLoading}
-                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      {roadmapLoading ? 'Uploading and extracting...' : 'Extract Spec from Document'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={generateRoadmap}
-                      disabled={roadmapLoading}
-                      className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50"
-                    >
-                      Generate Roadmap
-                    </button>
-                    <button
-                      type="button"
-                      onClick={activateRoadmap}
-                      disabled={roadmapLoading}
-                      className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-                    >
-                      Activate Roadmap
-                    </button>
+          const syncVisualToJson = (vs: VisualSpecState) => {
+            try {
+              const current = specEditor ? JSON.parse(specEditor) : {};
+              const next = {
+                ...current,
+                course_header: {
+                  ...(current.course_header || {}),
+                  course_name: vs.header.course_name,
+                  course_code: vs.header.course_code,
+                  level: vs.header.level,
+                  credit_units: vs.header.credit_units ? Number(vs.header.credit_units) : null,
+                  prerequisites: vs.header.prerequisites.split(',').map((s: string) => s.trim()).filter(Boolean),
+                  description: vs.header.description,
+                  rationale: vs.header.rationale,
+                  aim: vs.header.aim,
+                  contact_hours: {
+                    lectures: vs.header.lectures ? Number(vs.header.lectures) : null,
+                    practicals: vs.header.practicals ? Number(vs.header.practicals) : null,
+                    total: (vs.header.lectures ? Number(vs.header.lectures) : 0) + (vs.header.practicals ? Number(vs.header.practicals) : 0) || null,
+                  },
+                },
+                learning_outcomes: vs.learning_outcomes,
+                assessment_plan: vs.assessment_plan,
+              };
+              setSpecEditor(JSON.stringify(next, null, 2));
+              setSpecJsonError(null);
+            } catch {
+              // keep existing JSON
+            }
+          };
+
+          const handleReorder = (fromId: string, toId: string) => {
+            if (fromId === toId) return;
+            setRoadmapItems((prev) => {
+              const arr = [...prev];
+              const fromIdx = arr.findIndex((i) => i.id === fromId);
+              const toIdx = arr.findIndex((i) => i.id === toId);
+              if (fromIdx < 0 || toIdx < 0) return prev;
+              const [moved] = arr.splice(fromIdx, 1);
+              arr.splice(toIdx, 0, moved);
+              return arr.map((item, idx) => ({ ...item, orderIndex: idx + 1, weekNo: item.weekNo != null ? idx + 1 : null }));
+            });
+            setPendingReorder(true);
+            setDragId(null);
+            setDropId(null);
+          };
+
+          const confirmStructure = async () => {
+            setConfirmBusy(true);
+            setConfirmError(null);
+            try {
+              await Promise.allSettled(
+                roadmapItems.map((item, idx) =>
+                  updateRoadmapItem(item.id, {
+                    title: item.title,
+                    description: item.description || null,
+                    week_no: item.weekNo,
+                    estimated_hours: item.estimatedHours,
+                    sequence_no: idx + 1,
+                  })
+                )
+              );
+              setPendingReorder(false);
+            } catch (e: any) {
+              setConfirmError(e?.message || 'Failed to confirm structure.');
+            } finally {
+              setConfirmBusy(false);
+            }
+          };
+
+          // Build node data from roadmapItems — apply filter client-side (API always fetches all)
+          const filteredItems = roadmapFilter === 'all'
+            ? roadmapItems
+            : roadmapItems.filter((item) => item.status === roadmapFilter);
+
+          const nodes: RoadmapNodeData[] = filteredItems.map((item, idx) => ({
+            id: item.id,
+            sequenceNo: (item.orderIndex ?? idx + 1),
+            weekNo: item.weekNo ?? null,          // coerce undefined → null
+            title: item.title,
+            status: item.status,
+            taskCount: item.tasks.length,
+            estimatedHours: item.estimatedHours ?? null,
+          }));
+
+          const selectedItem = roadmapItems.find((i) => i.id === selectedItemId) || null;
+
+          return (
+            <div className="flex gap-4">
+              {/* ── MAIN COLUMN ────────────────────────────────────────────── */}
+              <div className="min-w-0 flex-1 space-y-4">
+                <InlineErrorBanner message={roadmapError} />
+                {roadmapNotice && (
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                    {roadmapNotice}
                   </div>
-                  <p className="mt-2 text-xs text-gray-500">
-                    {specSourceFile ? `Selected file: ${specSourceFile.name}` : 'Upload a blueprint document to extract a spec.'}
-                  </p>
+                )}
 
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-600">
-                    <span>Spec ID: {specId || 'None'}</span>
-                    <span>•</span>
-                    <span>Status: {specStatus || 'Not set'}</span>
-                  </div>
-                </SectionCard>
+                {!selectedOffering ? (
+                  <SectionCard title="Roadmap Builder" description="Select an offering to begin roadmap design.">
+                    <p className="text-sm text-gray-500">No offering selected.</p>
+                  </SectionCard>
+                ) : (
+                  <>
+                    {/* ── PIPELINE CONTROLS ──────────────────────────────── */}
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <h2 className="text-base font-bold text-slate-800">Roadmap Builder</h2>
+                          <p className="text-xs text-slate-500">{selectedOffering.courseName} · {selectedOffering.term} {selectedOffering.year}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {specStatus && (
+                            <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                              specStatus === 'approved_active' ? 'bg-emerald-100 text-emerald-700' :
+                              specStatus === 'lecturer_review' ? 'bg-amber-100 text-amber-700' :
+                              'bg-slate-100 text-slate-600'
+                            }`}>
+                              Spec: {specStatus?.replace(/_/g, ' ')}
+                            </span>
+                          )}
+                          <select
+                            value={roadmapFilter}
+                            onChange={(e) => setRoadmapFilter(e.target.value as 'all' | 'draft' | 'approved_active')}
+                            className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs text-slate-700"
+                          >
+                            <option value="all">All items</option>
+                            <option value="draft">Draft only</option>
+                            <option value="approved_active">Active only</option>
+                          </select>
+                        </div>
+                      </div>
 
-                <SectionCard title="Spec JSON Editor" description="Review and edit extracted curriculum spec before approval.">
-                  <div className="mb-2 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={saveSpecEdits}
-                      disabled={!specId || roadmapLoading}
-                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      Save Spec
-                    </button>
-                    <button
-                      type="button"
-                      onClick={approveSpec}
-                      disabled={!specId || roadmapLoading}
-                      className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50"
-                    >
-                      Approve Spec
-                    </button>
-                  </div>
-                  <textarea
-                    value={specEditor}
-                    onChange={(event) => setSpecEditor(event.target.value)}
-                    rows={12}
-                    placeholder="Spec JSON appears here"
-                    className="w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3 font-mono text-xs text-gray-800 focus:border-blue-500 focus:outline-none"
-                  />
-                </SectionCard>
+                      <div className="flex flex-wrap gap-2">
+                        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition">
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                          <input type="file" accept=".pdf,.docx" className="hidden" onChange={(e) => { setSpecSourceFile(e.target.files?.[0] || null); setRoadmapError(null); }} />
+                          {specSourceFile ? specSourceFile.name : 'Choose PDF / DOCX'}
+                        </label>
 
-                <SectionCard title="Add Roadmap Item" description="Define learning milestones for this offering.">
-                  <div className="grid grid-cols-1 gap-2 md:grid-cols-2 lg:grid-cols-4">
-                    <input
-                      value={newItemTitle}
-                      onChange={(event) => setNewItemTitle(event.target.value)}
-                      placeholder="Title"
-                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                    />
-                    <input
-                      value={newItemWeekNo}
-                      onChange={(event) => setNewItemWeekNo(event.target.value)}
-                      placeholder="Week number"
-                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                    />
-                    <input
-                      value={newItemEstimatedHours}
-                      onChange={(event) => setNewItemEstimatedHours(event.target.value)}
-                      placeholder="Estimated hours"
-                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                    />
-                    <button
-                      type="button"
-                      onClick={createRoadmapItem}
-                      disabled={!newItemTitle.trim() || roadmapLoading}
-                      className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-                    >
-                      Add Item
-                    </button>
-                  </div>
-                  <textarea
-                    value={newItemDescription}
-                    onChange={(event) => setNewItemDescription(event.target.value)}
-                    rows={2}
-                    placeholder="Description"
-                    className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                  />
-                </SectionCard>
+                        <button type="button" onClick={extractSpec} disabled={!specSourceFile || roadmapLoading}
+                          className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition">
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
+                          {roadmapLoading ? 'Extracting…' : 'Extract Spec'}
+                        </button>
 
-                <SectionCard title="Roadmap Items" description="Edit items and manage assessment task policies.">
-                  {roadmapLoading ? (
-                    <p className="text-sm text-gray-500">Loading roadmap...</p>
-                  ) : roadmapItems.length === 0 ? (
-                    <p className="text-sm text-gray-500">No roadmap items found.</p>
-                  ) : (
-                    <div className="space-y-4">
-                      {roadmapItems.map((item) => {
-                        const taskCreateDraft = getTaskCreateDraft(item.id);
-                        return (
-                          <div key={item.id} className="rounded-3xl border border-gray-200 bg-gray-50 p-4">
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                              <div className="min-w-[260px] flex-1 space-y-2">
-                                <input
-                                  value={item.title}
-                                  onChange={(event) => {
-                                    const next = event.target.value;
-                                    setRoadmapItems((prev) => prev.map((entry) => (entry.id === item.id ? { ...entry, title: next } : entry)));
-                                  }}
-                                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                />
-                                <textarea
-                                  value={item.description}
-                                  onChange={(event) => {
-                                    const next = event.target.value;
-                                    setRoadmapItems((prev) => prev.map((entry) => (entry.id === item.id ? { ...entry, description: next } : entry)));
-                                  }}
-                                  rows={2}
-                                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                />
-                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                                  <input
-                                    value={item.weekNo ?? ''}
-                                    onChange={(event) => {
-                                      const next = asNumber(event.target.value);
-                                      setRoadmapItems((prev) => prev.map((entry) => (entry.id === item.id ? { ...entry, weekNo: next } : entry)));
-                                    }}
-                                    placeholder="Week"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                  <input
-                                    value={item.estimatedHours ?? ''}
-                                    onChange={(event) => {
-                                      const next = asNumber(event.target.value);
-                                      setRoadmapItems((prev) => prev.map((entry) => (entry.id === item.id ? { ...entry, estimatedHours: next } : entry)));
-                                    }}
-                                    placeholder="Hours"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                </div>
-                              </div>
+                        <button type="button" onClick={generateRoadmap} disabled={roadmapLoading}
+                          className="flex items-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50 transition">
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                          Generate Roadmap
+                        </button>
 
-                              <div className="flex flex-wrap items-center gap-2">
-                                <StatusPill status={item.status} />
-                                <button
-                                  type="button"
-                                  onClick={() => updateRoadmapItem(item.id, {
-                                    title: item.title,
-                                    description: item.description || null,
-                                    week_no: item.weekNo,
-                                    estimated_hours: item.estimatedHours,
-                                  })}
-                                  className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100"
-                                >
-                                  Save
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => archiveRoadmapItem(item.id)}
-                                  className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50"
-                                >
-                                  Archive
-                                </button>
-                              </div>
-                            </div>
-
-                            <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-3">
-                              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">Assessment Tasks</p>
-
-                              <div className="mt-3 space-y-3">
-                                {item.tasks.length === 0 ? (
-                                  <p className="text-sm text-gray-500">No tasks yet.</p>
-                                ) : (
-                                  item.tasks.map((task, index) => {
-                                    const draft = getTaskEditDraft(task);
-
-                                    return (
-                                      <div key={task.id} className="rounded-2xl border border-gray-200 bg-gray-50 p-3">
-                                        {/** Visual rubric builder (keeps JSON payload contract). */}
-                                        {(() => {
-                                          const rubricRows = rubricRowsFromJsonText(draft.rubric_json);
-                                          return (
-                                            <div className="mt-2 rounded-xl border border-gray-200 bg-white p-2">
-                                              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Rubric Builder</p>
-                                              <div className="mt-2 space-y-2">
-                                                {rubricRows.map((row, rubricIndex) => (
-                                                  <div key={`task-edit-rubric-${task.id}-${rubricIndex}`} className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_120px_auto]">
-                                                    <input
-                                                      value={row.criterion}
-                                                      onChange={(event) =>
-                                                        setTaskEditDraftField(
-                                                          task,
-                                                          'rubric_json',
-                                                          setRubricRowField(draft.rubric_json, rubricIndex, 'criterion', event.target.value)
-                                                        )
-                                                      }
-                                                      placeholder="Criterion (e.g. correctness)"
-                                                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                                    />
-                                                    <input
-                                                      value={row.value}
-                                                      onChange={(event) =>
-                                                        setTaskEditDraftField(
-                                                          task,
-                                                          'rubric_json',
-                                                          setRubricRowField(draft.rubric_json, rubricIndex, 'value', event.target.value)
-                                                        )
-                                                      }
-                                                      placeholder="Weight"
-                                                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                                    />
-                                                    <button
-                                                      type="button"
-                                                      onClick={() => setTaskEditDraftField(task, 'rubric_json', removeRubricRow(draft.rubric_json, rubricIndex))}
-                                                      className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50"
-                                                    >
-                                                      Remove
-                                                    </button>
-                                                  </div>
-                                                ))}
-                                              </div>
-                                              <button
-                                                type="button"
-                                                onClick={() => setTaskEditDraftField(task, 'rubric_json', addRubricRow(draft.rubric_json))}
-                                                className="mt-2 rounded-xl border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100"
-                                              >
-                                                Add criterion
-                                              </button>
-                                            </div>
-                                          );
-                                        })()}
-
-                                        <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
-                                          <input
-                                            value={draft.title}
-                                            onChange={(event) => setTaskEditDraftField(task, 'title', event.target.value)}
-                                            placeholder="Task title"
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
-                                          <select
-                                            value={draft.task_type}
-                                            onChange={(event) => setTaskEditDraftField(task, 'task_type', event.target.value)}
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          >
-                                            {TASK_TYPE_OPTIONS.map((taskType) => (
-                                              <option key={taskType} value={taskType}>
-                                                {taskType}
-                                              </option>
-                                            ))}
-                                          </select>
-                                          <input
-                                            type="datetime-local"
-                                            value={draft.due_at}
-                                            onChange={(event) => setTaskEditDraftField(task, 'due_at', event.target.value)}
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
-                                          <input
-                                            value={draft.max_attempts}
-                                            onChange={(event) => setTaskEditDraftField(task, 'max_attempts', event.target.value)}
-                                            placeholder="Max attempts"
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
-                                          <input
-                                            value={draft.late_penalty_percent}
-                                            onChange={(event) => setTaskEditDraftField(task, 'late_penalty_percent', event.target.value)}
-                                            placeholder="Late penalty %"
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
-                                          <input
-                                            value={draft.max_score}
-                                            onChange={(event) => setTaskEditDraftField(task, 'max_score', event.target.value)}
-                                            placeholder="Max score"
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
-                                          <input
-                                            value={draft.weight}
-                                            onChange={(event) => setTaskEditDraftField(task, 'weight', event.target.value)}
-                                            placeholder="Weight"
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
-                                          <label className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700">
-                                            <input
-                                              type="checkbox"
-                                              checked={draft.allow_late_submission}
-                                              onChange={(event) => setTaskEditDraftField(task, 'allow_late_submission', event.target.checked)}
-                                            />
-                                            Allow late
-                                          </label>
-                                        </div>
-
-                                        <textarea
-                                          value={draft.description}
-                                          onChange={(event) => setTaskEditDraftField(task, 'description', event.target.value)}
-                                          rows={2}
-                                          placeholder="Task description"
-                                          className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                        />
-                                        <textarea
-                                          value={draft.practical_brief}
-                                          onChange={(event) => setTaskEditDraftField(task, 'practical_brief', event.target.value)}
-                                          rows={2}
-                                          placeholder="Practical brief (objective, steps, deliverable context)"
-                                          className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                        />
-                                        <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-                                          <input
-                                            value={draft.required_tools}
-                                            onChange={(event) => setTaskEditDraftField(task, 'required_tools', event.target.value)}
-                                            placeholder="Required tools or materials"
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
-                                          <input
-                                            value={draft.expected_artifact}
-                                            onChange={(event) => setTaskEditDraftField(task, 'expected_artifact', event.target.value)}
-                                            placeholder="Expected artifact (report, repo, demo, etc.)"
-                                            className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                          />
-                                        </div>
-                                        <textarea
-                                          value={draft.safety_notes}
-                                          onChange={(event) => setTaskEditDraftField(task, 'safety_notes', event.target.value)}
-                                          rows={2}
-                                          placeholder="Safety, ethics, or policy notes"
-                                          className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                        />
-                                        <textarea
-                                          value={draft.rubric_json}
-                                          onChange={(event) => setTaskEditDraftField(task, 'rubric_json', event.target.value)}
-                                          rows={3}
-                                          placeholder='Rubric JSON, e.g. {"correctness": 40, "process": 30, "reflection": 30}'
-                                          className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm font-mono"
-                                        />
-
-                                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                                          <button
-                                            type="button"
-                                            onClick={() => saveTask(task)}
-                                            className="rounded-xl border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100"
-                                          >
-                                            Save task
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => deactivateTask(task.id)}
-                                            className="rounded-xl border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50"
-                                          >
-                                            Deactivate
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => moveTask(item, task.id, -1)}
-                                            disabled={index === 0}
-                                            className="rounded-xl border border-gray-200 px-3 py-1.5 text-xs text-gray-700 disabled:opacity-40"
-                                          >
-                                            Move up
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => moveTask(item, task.id, 1)}
-                                            disabled={index === item.tasks.length - 1}
-                                            className="rounded-xl border border-gray-200 px-3 py-1.5 text-xs text-gray-700 disabled:opacity-40"
-                                          >
-                                            Move down
-                                          </button>
-                                        </div>
-                                      </div>
-                                    );
-                                  })
-                                )}
-                              </div>
-
-                              <div className="mt-4 rounded-2xl border border-dashed border-gray-300 bg-gray-50 p-3">
-                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">Add Task</p>
-                                <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
-                                  <input
-                                    value={taskCreateDraft.title}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'title', event.target.value)}
-                                    placeholder="Title"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                  <select
-                                    value={taskCreateDraft.task_type}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'task_type', event.target.value)}
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  >
-                                    {TASK_TYPE_OPTIONS.map((taskType) => (
-                                      <option key={taskType} value={taskType}>
-                                        {taskType}
-                                      </option>
-                                    ))}
-                                  </select>
-                                  <input
-                                    type="datetime-local"
-                                    value={taskCreateDraft.due_at}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'due_at', event.target.value)}
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                  <input
-                                    value={taskCreateDraft.max_attempts}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'max_attempts', event.target.value)}
-                                    placeholder="Max attempts"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                  <input
-                                    value={taskCreateDraft.late_penalty_percent}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'late_penalty_percent', event.target.value)}
-                                    placeholder="Late penalty %"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                  <input
-                                    value={taskCreateDraft.max_score}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'max_score', event.target.value)}
-                                    placeholder="Max score"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                  <input
-                                    value={taskCreateDraft.weight}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'weight', event.target.value)}
-                                    placeholder="Weight"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                  <label className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700">
-                                    <input
-                                      type="checkbox"
-                                      checked={taskCreateDraft.allow_late_submission}
-                                      onChange={(event) => setTaskCreateDraftField(item.id, 'allow_late_submission', event.target.checked)}
-                                    />
-                                    Allow late
-                                  </label>
-                                </div>
-                                <textarea
-                                  value={taskCreateDraft.description}
-                                  onChange={(event) => setTaskCreateDraftField(item.id, 'description', event.target.value)}
-                                  rows={2}
-                                  placeholder="Task description"
-                                  className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                />
-                                <textarea
-                                  value={taskCreateDraft.practical_brief}
-                                  onChange={(event) => setTaskCreateDraftField(item.id, 'practical_brief', event.target.value)}
-                                  rows={2}
-                                  placeholder="Practical brief (objective, steps, deliverable context)"
-                                  className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                />
-                                <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-                                  <input
-                                    value={taskCreateDraft.required_tools}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'required_tools', event.target.value)}
-                                    placeholder="Required tools or materials"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                  <input
-                                    value={taskCreateDraft.expected_artifact}
-                                    onChange={(event) => setTaskCreateDraftField(item.id, 'expected_artifact', event.target.value)}
-                                    placeholder="Expected artifact (report, repo, demo, etc.)"
-                                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                  />
-                                </div>
-                                <textarea
-                                  value={taskCreateDraft.safety_notes}
-                                  onChange={(event) => setTaskCreateDraftField(item.id, 'safety_notes', event.target.value)}
-                                  rows={2}
-                                  placeholder="Safety, ethics, or policy notes"
-                                  className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                />
-                                {(() => {
-                                  const rubricRows = rubricRowsFromJsonText(taskCreateDraft.rubric_json);
-                                  return (
-                                    <div className="mt-2 rounded-xl border border-gray-200 bg-white p-2">
-                                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Rubric Builder</p>
-                                      <div className="mt-2 space-y-2">
-                                        {rubricRows.map((row, rubricIndex) => (
-                                          <div key={`task-create-rubric-${item.id}-${rubricIndex}`} className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_120px_auto]">
-                                            <input
-                                              value={row.criterion}
-                                              onChange={(event) =>
-                                                setTaskCreateDraftField(
-                                                  item.id,
-                                                  'rubric_json',
-                                                  setRubricRowField(taskCreateDraft.rubric_json, rubricIndex, 'criterion', event.target.value)
-                                                )
-                                              }
-                                              placeholder="Criterion (e.g. correctness)"
-                                              className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                            />
-                                            <input
-                                              value={row.value}
-                                              onChange={(event) =>
-                                                setTaskCreateDraftField(
-                                                  item.id,
-                                                  'rubric_json',
-                                                  setRubricRowField(taskCreateDraft.rubric_json, rubricIndex, 'value', event.target.value)
-                                                )
-                                              }
-                                              placeholder="Weight"
-                                              className="rounded-xl border border-gray-200 px-3 py-2 text-sm"
-                                            />
-                                            <button
-                                              type="button"
-                                              onClick={() => setTaskCreateDraftField(item.id, 'rubric_json', removeRubricRow(taskCreateDraft.rubric_json, rubricIndex))}
-                                              className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50"
-                                            >
-                                              Remove
-                                            </button>
-                                          </div>
-                                        ))}
-                                      </div>
-                                      <button
-                                        type="button"
-                                        onClick={() => setTaskCreateDraftField(item.id, 'rubric_json', addRubricRow(taskCreateDraft.rubric_json))}
-                                        className="mt-2 rounded-xl border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100"
-                                      >
-                                        Add criterion
-                                      </button>
-                                    </div>
-                                  );
-                                })()}
-                                <textarea
-                                  value={taskCreateDraft.rubric_json}
-                                  onChange={(event) => setTaskCreateDraftField(item.id, 'rubric_json', event.target.value)}
-                                  rows={3}
-                                  placeholder='Rubric JSON, e.g. {"correctness": 40, "process": 30, "reflection": 30}'
-                                  className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-2 text-sm font-mono"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => createTask(item.id)}
-                                  className="mt-2 rounded-xl bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500"
-                                >
-                                  Add task
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
+                        <button type="button" onClick={activateRoadmap} disabled={roadmapLoading}
+                          className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50 transition">
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          Activate Roadmap
+                        </button>
+                      </div>
                     </div>
-                  )}
-                </SectionCard>
-              </>
-            )}
-          </div>
-        )}
+
+                    {/* ── SPEC EDITOR (tabbed) ────────────────────────────── */}
+                    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+                      {/* Tab header */}
+                      <div className="flex items-center justify-between border-b border-slate-100 px-4 pt-3">
+                        <div className="flex gap-0">
+                          {(['visual', 'json'] as const).map((mode) => (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => {
+                                if (mode === 'json' && specEditorMode === 'visual') {
+                                  syncVisualToJson(visualSpec);
+                                }
+                                if (mode === 'visual' && specEditorMode === 'json') {
+                                  const parsed = buildVisualSpec(specEditor);
+                                  setVisualSpec(parsed);
+                                  try { JSON.parse(specEditor); setSpecJsonError(null); } catch { setSpecJsonError('Invalid JSON'); }
+                                }
+                                setSpecEditorMode(mode);
+                              }}
+                              className={`rounded-t-xl px-4 py-2 text-sm font-semibold transition border-b-2 ${
+                                specEditorMode === mode
+                                  ? 'border-blue-500 text-blue-700 bg-blue-50'
+                                  : 'border-transparent text-slate-500 hover:text-slate-700'
+                              }`}
+                            >
+                              {mode === 'visual' ? '✏️ Visual Editor' : '{ } JSON Editor'}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-2 pb-2">
+                          <button type="button" onClick={saveSpecEdits} disabled={!specId || roadmapLoading}
+                            className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition">
+                            💾 Save Spec
+                          </button>
+                          <button type="button" onClick={approveSpec} disabled={!specId || roadmapLoading || specStatus === 'approved_active'}
+                            className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 transition">
+                            ✅ Approve Spec
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Tab body */}
+                      <div className="p-4">
+                        {!specId && !specEditor && (
+                          <p className="text-sm text-slate-400 italic">No spec loaded yet. Upload a document and click "Extract Spec" to get started.</p>
+                        )}
+
+                        {specEditorMode === 'visual' && (specId || specEditor) && (
+                          <SpecVisualEditor
+                            spec={visualSpec}
+                            onChange={(next) => {
+                              setVisualSpec(next);
+                              syncVisualToJson(next);
+                            }}
+                          />
+                        )}
+
+                        {specEditorMode === 'json' && (
+                          <>
+                            {specJsonError && (
+                              <p className="mb-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">
+                                ⚠ {specJsonError}
+                              </p>
+                            )}
+                            <textarea
+                              value={specEditor}
+                              onChange={(e) => {
+                                setSpecEditor(e.target.value);
+                                try { JSON.parse(e.target.value); setSpecJsonError(null); } catch { setSpecJsonError('Invalid JSON — fix before saving'); }
+                              }}
+                              rows={16}
+                              placeholder="Spec JSON appears here after extraction…"
+                              className={`w-full rounded-xl border bg-slate-50 px-3 py-3 font-mono text-xs text-slate-800 focus:outline-none focus:ring-1 transition ${
+                                specJsonError ? 'border-red-400 focus:ring-red-400' : 'border-slate-200 focus:border-blue-400 focus:ring-blue-400'
+                              }`}
+                            />
+                            <button type="button"
+                              onClick={() => { try { setSpecEditor(JSON.stringify(JSON.parse(specEditor), null, 2)); setSpecJsonError(null); } catch { setSpecJsonError('Cannot format — invalid JSON'); } }}
+                              className="mt-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition">
+                              Format JSON
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* ── NODE CANVAS ─────────────────────────────────────── */}
+                    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+                      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-800">Curriculum Roadmap</h3>
+                          <p className="text-xs text-slate-500">
+                            {nodes.length > 0 ? `${nodes.length} weeks · Drag to reorder` : 'Generate the roadmap to see nodes here'}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {pendingReorder && (
+                            <>
+                              {confirmError && <span className="text-xs text-red-500">{confirmError}</span>}
+                              <button type="button" onClick={confirmStructure} disabled={confirmBusy}
+                                className="rounded-xl bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-indigo-500 disabled:opacity-50 transition animate-pulse">
+                                {confirmBusy ? 'Saving…' : '✓ Confirm Structure'}
+                              </button>
+                              <button type="button" onClick={() => { loadRoadmap(); setPendingReorder(false); }}
+                                className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 transition">
+                                Discard
+                              </button>
+                            </>
+                          )}
+                          {/* Add week button */}
+                          <button type="button"
+                            onClick={() => {
+                              const nextWeek = nodes.length + 1;
+                              setNewItemTitle(`Week ${nextWeek}`);
+                              setNewItemWeekNo(String(nextWeek));
+                              // scroll to add-item form
+                              document.getElementById('add-roadmap-item-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }}
+                            className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition">
+                            + Add Week
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="p-4">
+                        {roadmapLoading ? (
+                          <div className="flex items-center gap-2 text-sm text-slate-500">
+                            <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" /></svg>
+                            Loading roadmap…
+                          </div>
+                        ) : nodes.length === 0 ? (
+                          <div className="flex flex-col items-center gap-3 py-10 text-center">
+                            <div className="text-4xl">🗺️</div>
+                            <p className="text-sm font-semibold text-slate-600">No roadmap items yet</p>
+                            <p className="text-xs text-slate-400">Approve your spec and click "Generate Roadmap" to create the curriculum structure.</p>
+                          </div>
+                        ) : (
+                          <>
+                            {/* Horizontal scrollable node row with connectors */}
+                            <div className="overflow-x-auto pb-2">
+                              <div className="flex items-start gap-0 min-w-max">
+                                {nodes.map((node, idx) => (
+                                  <div key={node.id} className="flex items-center">
+                                    <RoadmapNode
+                                      node={node}
+                                      isSelected={selectedItemId === node.id}
+                                      isDragging={dragId === node.id}
+                                      isDropTarget={dropId === node.id && dragId !== node.id}
+                                      onSelect={(id) => setSelectedItemId((prev) => (prev === id ? null : id))}
+                                      onDragStart={(e, id) => { e.dataTransfer.effectAllowed = 'move'; setDragId(id); }}
+                                      onDragOver={(e, id) => { e.preventDefault(); setDropId(id); }}
+                                      onDragLeave={() => setDropId(null)}
+                                      onDrop={(e, targetId) => { e.preventDefault(); if (dragId) handleReorder(dragId, targetId); }}
+                                    />
+                                    {idx < nodes.length - 1 && (
+                                      <div className="flex h-full w-6 flex-none items-center justify-center">
+                                        <svg className="h-4 w-6 text-slate-300" viewBox="0 0 24 16" fill="none">
+                                          <path d="M0 8 H18 M14 3 L22 8 L14 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                        </svg>
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            <p className="mt-2 text-center text-xs text-slate-400">Click a node to edit · Drag to reorder</p>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* ── ADD ITEM FORM ───────────────────────────────────── */}
+                    <div id="add-roadmap-item-form" className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <h3 className="mb-3 text-sm font-bold text-slate-800">Add Week / Roadmap Item</h3>
+                      <div className="grid grid-cols-1 gap-2 md:grid-cols-2 lg:grid-cols-4">
+                        <input value={newItemTitle} onChange={(e) => setNewItemTitle(e.target.value)} placeholder="Title" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+                        <input value={newItemWeekNo} onChange={(e) => setNewItemWeekNo(e.target.value)} placeholder="Week number" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+                        <input value={newItemEstimatedHours} onChange={(e) => setNewItemEstimatedHours(e.target.value)} placeholder="Estimated hours" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+                        <button type="button" onClick={createRoadmapItem} disabled={!newItemTitle.trim() || roadmapLoading}
+                          className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50 transition">
+                          Add Item
+                        </button>
+                      </div>
+                      <textarea value={newItemDescription} onChange={(e) => setNewItemDescription(e.target.value)} rows={2} placeholder="Description (optional)" className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* ── SIDE PANEL: item editor ──────────────────────────────── */}
+              {selectedItem && (
+                <div className="w-96 flex-none">
+                  <div className="sticky top-4 rounded-2xl border border-slate-200 bg-white shadow-sm">
+                    <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                      <h3 className="text-sm font-bold text-slate-800">Edit Week {selectedItem.weekNo ?? (roadmapItems.findIndex((i) => i.id === selectedItem.id) + 1)}</h3>
+                      <button type="button" onClick={() => setSelectedItemId(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition">
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    </div>
+
+                    <div className="max-h-[80vh] overflow-y-auto p-4 space-y-3">
+                      <div>
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Title</label>
+                        <input
+                          value={selectedItem.title}
+                          onChange={(e) => {
+                            const next = e.target.value;
+                            setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, title: next } : entry));
+                          }}
+                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Description</label>
+                        <textarea
+                          value={selectedItem.description}
+                          onChange={(e) => {
+                            const next = e.target.value;
+                            setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, description: next } : entry));
+                          }}
+                          rows={3}
+                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Week No.</label>
+                          <input type="number" value={selectedItem.weekNo ?? ''}
+                            onChange={(e) => { const next = asNumber(e.target.value); setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, weekNo: next } : entry)); }}
+                            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Est. Hours</label>
+                          <input type="number" value={selectedItem.estimatedHours ?? ''}
+                            onChange={(e) => { const next = asNumber(e.target.value); setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, estimatedHours: next } : entry)); }}
+                            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex gap-2 pt-1">
+                        <button type="button"
+                          onClick={() => updateRoadmapItem(selectedItem.id, { title: selectedItem.title, description: selectedItem.description || null, week_no: selectedItem.weekNo, estimated_hours: selectedItem.estimatedHours })}
+                          className="flex-1 rounded-xl bg-blue-600 py-2 text-xs font-bold text-white hover:bg-blue-500 transition">
+                          Save Changes
+                        </button>
+                        <button type="button"
+                          onClick={() => { archiveRoadmapItem(selectedItem.id); setSelectedItemId(null); }}
+                          className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 transition">
+                          Archive
+                        </button>
+                      </div>
+
+                      {/* Tasks section */}
+                      <div className="border-t border-slate-100 pt-3">
+                        <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">Assessment Tasks ({selectedItem.tasks.length})</p>
+                        {selectedItem.tasks.length === 0 && <p className="text-xs text-slate-400 italic">No tasks yet.</p>}
+                        {selectedItem.tasks.map((task, taskIdx) => {
+                          const draft = getTaskEditDraft(task);
+                          return (
+                            <div key={task.id} className="mb-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-semibold text-slate-700">{task.title}</span>
+                                <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">{task.taskType}</span>
+                              </div>
+                              <div className="mt-2 grid grid-cols-2 gap-1">
+                                <input value={draft.title} onChange={(e) => setTaskEditDraftField(task, 'title', e.target.value)} placeholder="Title" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                <select value={draft.task_type} onChange={(e) => setTaskEditDraftField(task, 'task_type', e.target.value)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs">
+                                  {TASK_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+                                </select>
+                                <input value={draft.max_score} onChange={(e) => setTaskEditDraftField(task, 'max_score', e.target.value)} placeholder="Max score" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                <input value={draft.weight} onChange={(e) => setTaskEditDraftField(task, 'weight', e.target.value)} placeholder="Weight" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                              </div>
+                              <textarea value={draft.description} onChange={(e) => setTaskEditDraftField(task, 'description', e.target.value)} rows={2} placeholder="Description" className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                              <div className="mt-1.5 flex gap-1">
+                                <button type="button" onClick={() => saveTask(task)} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">Save</button>
+                                <button type="button" onClick={() => deactivateTask(task.id)} className="rounded-lg border border-red-200 px-2 py-1 text-[10px] font-semibold text-red-600 hover:bg-red-50">Remove</button>
+                                <button type="button" onClick={() => moveTask(selectedItem, task.id, -1)} disabled={taskIdx === 0} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-40">↑</button>
+                                <button type="button" onClick={() => moveTask(selectedItem, task.id, 1)} disabled={taskIdx === selectedItem.tasks.length - 1} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-40">↓</button>
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {/* Add task mini form */}
+                        {(() => {
+                          const taskCreateDraft = getTaskCreateDraft(selectedItem.id);
+                          return (
+                            <div className="mt-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-2">
+                              <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Add Task</p>
+                              <div className="grid grid-cols-2 gap-1">
+                                <input value={taskCreateDraft.title} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'title', e.target.value)} placeholder="Title" className="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                <select value={taskCreateDraft.task_type} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'task_type', e.target.value)} className="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-xs">
+                                  {TASK_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+                                </select>
+                                <input value={taskCreateDraft.max_score} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'max_score', e.target.value)} placeholder="Max score" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                <input value={taskCreateDraft.weight} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'weight', e.target.value)} placeholder="Weight" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                              </div>
+                              <textarea value={taskCreateDraft.description} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'description', e.target.value)} rows={2} placeholder="Description" className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                              <button type="button" onClick={() => createTask(selectedItem.id)} className="mt-1.5 w-full rounded-xl bg-blue-600 py-1.5 text-[10px] font-bold text-white hover:bg-blue-500">
+                                Add Task
+                              </button>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {activeTab === 'students' && (
           <div className="space-y-4">

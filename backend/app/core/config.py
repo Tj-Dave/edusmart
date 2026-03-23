@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     QUERY_LLM_TEMPERATURE: float = 0.3
     QUERY_LLM_TOP_P: float = 0.9
 
-    QUERY_LLM_N_GPU_LAYERS: int = 16
+    QUERY_LLM_N_GPU_LAYERS: int = 8
     QUERY_LLM_N_BATCH: int = 128
     QUERY_LLM_GPU_F16_KV: bool = True
 
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     FINAL_LLM_TEMPERATURE: float = 0.7
     FINAL_LLM_TOP_P: float = 0.9
 
-    FINAL_LLM_N_GPU_LAYERS: int = 20
+    FINAL_LLM_N_GPU_LAYERS: int = 12
     FINAL_LLM_N_BATCH: int = 256
     FINAL_LLM_GPU_F16_KV: bool = True
 

@@ -52,7 +52,7 @@ class Notification(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     channel: Mapped[str] = mapped_column(String(32), nullable=False)  # in_app, email, push
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    metadata: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True, name="metadata")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user = relationship("User")

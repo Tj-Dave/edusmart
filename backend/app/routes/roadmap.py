@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db.models import User
@@ -32,17 +32,19 @@ router = APIRouter(tags=["roadmap"])
 @router.post("/offerings/{offering_id}/roadmap/generate", response_model=list[RoadmapItemOut])
 def generate_roadmap_endpoint(
     offering_id: UUID,
-    payload: RoadmapGenerateRequest,
+    payload: RoadmapGenerateRequest = Body(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
+        spec_id = payload.spec_id if payload else None
+        archive = payload.archive_existing_drafts if payload else True
         return generate_roadmap_from_spec(
             db,
             offering_id=offering_id,
             actor=current_user,
-            spec_id=payload.spec_id,
-            archive_existing_drafts=payload.archive_existing_drafts,
+            spec_id=spec_id,
+            archive_existing_drafts=archive,
         )
     except Exception as err:
         raise to_http_exception(err)
@@ -69,16 +71,17 @@ def list_roadmap_endpoint(
 @router.post("/offerings/{offering_id}/roadmap/activate", response_model=GenericActionOut)
 def activate_roadmap_endpoint(
     offering_id: UUID,
-    payload: RoadmapActivateRequest,
+    payload: RoadmapActivateRequest = Body(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
+        archive = payload.archive_existing_active if payload else True
         count = activate_roadmap(
             db,
             offering_id=offering_id,
             actor=current_user,
-            archive_existing_active=payload.archive_existing_active,
+            archive_existing_active=archive,
         )
         return {"ok": True, "message": f"Activated {count} roadmap items"}
     except Exception as err:

@@ -45,13 +45,21 @@ def _parse_dt(value: Any) -> datetime | None:
 
 
 def _normalized_item_payloads(spec_json: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Normalize roadmap_items from the canonical spec JSON into the shape expected
+    by generate_roadmap_from_spec().
+
+    Canonical fields consumed (from the new schema):
+      sequence_no, week_no, clo_ref, title, key_content, teaching_activity,
+      competences_emphasised, assessment_task, estimated_hours, tasks[]
+    """
     if not isinstance(spec_json, dict):
         return []
 
     candidates = spec_json.get("roadmap_items")
     if not isinstance(candidates, list):
+        # Legacy fallback key
         candidates = spec_json.get("modules")
-
     if not isinstance(candidates, list):
         return []
 
@@ -59,21 +67,75 @@ def _normalized_item_payloads(spec_json: dict[str, Any]) -> list[dict[str, Any]]
     for idx, raw in enumerate(candidates, start=1):
         if not isinstance(raw, dict):
             continue
-        title = (raw.get("title") or raw.get("name") or f"Week {idx} learning block").strip()
-        if not title:
-            title = f"Week {idx} learning block"
+
+        title = (raw.get("title") or raw.get("name") or f"Week {idx}").strip() or f"Week {idx}"
+
+        # ── Build rich key_content for students ──────────────────────────────
+        # Combine what the spec says: key content, CLO tag, competence, activity
+        key_content_parts = []
+        if raw.get("key_content"):
+            key_content_parts.append(raw["key_content"].strip())
+        if raw.get("clo_ref"):
+            key_content_parts.append(f"Learning Outcome: {raw['clo_ref']}")
+        if raw.get("competences_emphasised"):
+            key_content_parts.append(f"Competence Focus: {raw['competences_emphasised']}")
+        if raw.get("teaching_activity"):
+            key_content_parts.append(f"Activity: {raw['teaching_activity']}")
+        key_content = " | ".join(key_content_parts) if key_content_parts else None
+
+        # ── Normalise tasks[] ────────────────────────────────────────────────
+        raw_tasks = raw.get("tasks") if isinstance(raw.get("tasks"), list) else []
+
+        # If the spec only named the assessment_task but didn't expand it into
+        # tasks[], synthesise a minimal task entry from assessment_task name
+        if not raw_tasks and raw.get("assessment_task"):
+            raw_tasks = [
+                {
+                    "title": raw["assessment_task"],
+                    "task_type": _infer_task_type(raw["assessment_task"]),
+                    "description": f"Assessment deliverable for Week {raw.get('week_no', idx)}: {raw['assessment_task']}",
+                    "max_score": 100,
+                    "is_required": True,
+                }
+            ]
+
         out.append(
             {
                 "sequence_no": int(raw.get("sequence_no") or idx),
                 "week_no": raw.get("week_no"),
+                "clo_ref": raw.get("clo_ref", ""),
                 "title": title,
-                "key_content": raw.get("key_content"),
+                "key_content": key_content,
                 "teaching_activity": raw.get("teaching_activity"),
                 "estimated_hours": _to_float(raw.get("estimated_hours")),
-                "tasks": raw.get("tasks") if isinstance(raw.get("tasks"), list) else [],
+                "tasks": raw_tasks,
             }
         )
     return out
+
+
+def _infer_task_type(task_name: str) -> str:
+    """Heuristically map an assessment task name to a task_type enum value."""
+    name = (task_name or "").lower()
+    if any(k in name for k in ("quiz", "test", "mcq")):
+        return "quiz"
+    if any(k in name for k in ("lab", "practical", "crud", "demo", "app", "bundle", "module")):
+        return "lab"
+    if any(k in name for k in ("presentation", "defense", "milestone", "demo")):
+        return "presentation"
+    if any(k in name for k in ("report", "documentation", "note", "writing")):
+        return "assignment"
+    if any(k in name for k in ("prototype", "wireframe", "design", "ui")):
+        return "project"
+    if any(k in name for k in ("peer", "review")):
+        return "peer_review"
+    if any(k in name for k in ("field", "survey")):
+        return "field_task"
+    if any(k in name for k in ("case", "scenario")):
+        return "case_study"
+    if any(k in name for k in ("reflect", "journal")):
+        return "reflection"
+    return "assignment"
 
 
 def refresh_assessment_task_count(db: Session, *, roadmap_item_id: UUID) -> int:

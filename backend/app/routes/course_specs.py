@@ -54,6 +54,62 @@ async def extract_spec_endpoint(
         raise to_http_exception(err)
 
 
+@router.get("/offerings/{offering_id}/specs/current", response_model=CourseSpecOut)
+def get_current_spec_endpoint(
+    offering_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the most-recent spec for an offering (approved_active preferred, else latest draft)."""
+    from app.db.models import CourseSpecStatus, OfferingCourseSpec
+    from app.services.domain_errors import ServiceNotFoundError
+    from app.services.access_control import require_lecturer_or_admin_for_offering
+    try:
+        require_lecturer_or_admin_for_offering(db, offering_id=offering_id, actor=current_user)
+        # Prefer approved_active
+        spec = (
+            db.query(OfferingCourseSpec)
+            .filter(
+                OfferingCourseSpec.course_offering_id == offering_id,
+                OfferingCourseSpec.status == CourseSpecStatus.approved_active,
+            )
+            .order_by(OfferingCourseSpec.created_at.desc())
+            .first()
+        )
+        if not spec:
+            # Fall back to any spec (draft / lecturer_review)
+            spec = (
+                db.query(OfferingCourseSpec)
+                .filter(OfferingCourseSpec.course_offering_id == offering_id)
+                .order_by(OfferingCourseSpec.created_at.desc())
+                .first()
+            )
+        if not spec:
+            raise ServiceNotFoundError("No course spec found for this offering")
+        return spec
+    except Exception as err:
+        raise to_http_exception(err)
+
+
+@router.get("/specs/{spec_id}", response_model=CourseSpecOut)
+def get_spec_endpoint(
+    spec_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.db.models import OfferingCourseSpec
+    from app.services.domain_errors import ServiceNotFoundError
+    from app.services.access_control import require_lecturer_or_admin_for_offering
+    try:
+        spec = db.query(OfferingCourseSpec).filter(OfferingCourseSpec.id == spec_id).one_or_none()
+        if not spec:
+            raise ServiceNotFoundError("Course spec not found")
+        require_lecturer_or_admin_for_offering(db, offering_id=spec.course_offering_id, actor=current_user)
+        return spec
+    except Exception as err:
+        raise to_http_exception(err)
+
+
 @router.patch("/specs/{spec_id}", response_model=CourseSpecOut)
 def update_spec_endpoint(
     spec_id: UUID,

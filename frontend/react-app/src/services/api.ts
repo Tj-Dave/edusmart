@@ -860,6 +860,24 @@ export const roadmapAdminApi = {
     return response.json();
   },
 
+  getSpec: async (token: string, specId: string) => {
+    const response = await fetch(`${API_BASE_URL}/specs/${specId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  getCurrentSpec: async (token: string, offeringId: string) => {
+    const response = await fetch(`${API_BASE_URL}/offerings/${offeringId}/specs/current`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    // 404 = no spec yet for this offering, not a hard error
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
   generateRoadmap: async (token: string, offeringId: string) => {
     const response = await fetch(`${API_BASE_URL}/offerings/${offeringId}/roadmap/generate`, {
       method: 'POST',
