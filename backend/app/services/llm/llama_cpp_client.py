@@ -100,11 +100,12 @@ class LLMClient:
         if not self.llm:
             raise RuntimeError("LLM model not initialized.")
 
-        response = self.llm(
-            prompt,
+        response = self.llm.create_chat_completion(
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
             max_tokens=settings.FINAL_LLM_MAX_TOKENS,
             temperature=settings.FINAL_LLM_TEMPERATURE,
             top_p=settings.FINAL_LLM_TOP_P,
-            stop=["</s>"],
         )
-        return response["choices"][0]["text"].strip()
+        return response["choices"][0]["message"]["content"].strip()

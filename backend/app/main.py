@@ -19,9 +19,15 @@ from app.services.memory.memory_manager import MemoryManagerPG
 from app.routes.ai_query import router as ai_query_router
 from app.routes.chats import router as chats_router
 from app.routes.auth import router as auth_router
-from app.routes.ingestion import router as ingestion_router  # ✅ add
+from app.routes.ingestion_router import router as ingestion_router
 from app.routes.courses import router as courses_router
 from app.routes.enrollments import router as enrollments_router
+from app.routes.course_specs import router as course_specs_router
+from app.routes.roadmap import router as roadmap_router
+from app.routes.assessments import router as assessments_router
+from app.routes.progress import router as progress_router
+from app.routes.gamification import router as gamification_router
+from app.routes.notifications_sse import router as notifications_sse_router
 
 app = FastAPI(title="EduSmart Backend")
 
@@ -75,6 +81,12 @@ app.include_router(ai_query_router)
 app.include_router(ingestion_router)
 app.include_router(courses_router)
 app.include_router(enrollments_router)
+app.include_router(course_specs_router)
+app.include_router(roadmap_router)
+app.include_router(assessments_router)
+app.include_router(progress_router)
+app.include_router(gamification_router)
+app.include_router(notifications_sse_router)
 
 @app.get("/health")
 def health():

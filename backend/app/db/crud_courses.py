@@ -1,6 +1,7 @@
 # app/db/crud_courses.py
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 
@@ -11,7 +12,17 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 
 
-from app.db.models import Course, CourseOffering, Enrollment, EnrollmentEvent
+from app.db.models import (
+    Course,
+    CourseOffering,
+    Enrollment,
+    EnrollmentEvent,
+    OfferingCourseSpec,
+    OfferingRoadmapItem,
+    User,
+)
+
+UNSET = object()
 
 # -------------------------
 # Helper functions
@@ -301,6 +312,101 @@ def set_offering_active(db: Session, *, offering_id: UUID, is_active: bool) -> C
     return o
 
 
+def update_offering(
+    db: Session,
+    *,
+    offering_id: UUID,
+    course_code: Optional[str] | object = UNSET,
+    term: Optional[str] | object = UNSET,
+    year: Optional[int] | object = UNSET,
+    cohort: Optional[str] | object = UNSET,
+    section: Optional[str] | object = UNSET,
+    is_active: Optional[bool] | object = UNSET,
+    enrollment_key: Optional[str] | object = UNSET,
+    auto_generate_enrollment_key: Optional[bool] | object = UNSET,
+) -> CourseOffering:
+    o = get_offering(db, offering_id)
+    if not o:
+        raise ValueError("Offering not found")
+
+    next_code = (o.course_code if course_code is UNSET else (course_code or "")).strip()
+    if not next_code:
+        raise ValueError("course_code is required")
+
+    next_term = (o.term if term is UNSET else (term or "")).strip()
+    if not next_term:
+        raise ValueError("term is required")
+
+    c = get_course(db, next_code)
+    if not c:
+        raise ValueError("Course not found")
+
+    o.course_code = next_code
+    o.term = next_term
+    if year is not UNSET:
+        o.year = year
+    if cohort is not UNSET:
+        o.cohort = (cohort or "").strip() or None
+    if section is not UNSET:
+        o.section = (section or "").strip() or None
+    if is_active is not UNSET:
+        o.is_active = is_active
+
+    if auto_generate_enrollment_key is not UNSET or enrollment_key is not UNSET:
+        key = (
+            (enrollment_key or "").strip()
+            if enrollment_key is not UNSET and enrollment_key is not None
+            else None
+        )
+        if key == "":
+            key = None
+
+        generated = False
+        if auto_generate_enrollment_key is True and key is None:
+            for _ in range(5):
+                candidate = _generate_enrollment_key(next_code)
+                exists = db.query(CourseOffering).filter(
+                    CourseOffering.enrollment_key == candidate,
+                    CourseOffering.id != offering_id,
+                ).one_or_none()
+                if not exists:
+                    key = candidate
+                    generated = True
+                    break
+            if key is None:
+                raise ValueError("Failed to generate a unique enrollment key")
+
+        o.enrollment_key = key
+        o.enrollment_key_generated = generated
+
+    o.updated_at = datetime.now(timezone.utc)
+
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise ValueError(f"Offering already exists or invalid: {e}")
+
+    db.refresh(o)
+    return o
+
+
+def delete_offering(db: Session, *, offering_id: UUID) -> None:
+    o = get_offering(db, offering_id)
+    if not o:
+        raise ValueError("Offering not found")
+
+    has_enrollments = db.query(Enrollment.id).filter(Enrollment.offering_id == offering_id).first() is not None
+    has_specs = db.query(OfferingCourseSpec.id).filter(OfferingCourseSpec.course_offering_id == offering_id).first() is not None
+    has_roadmap = db.query(OfferingRoadmapItem.id).filter(OfferingRoadmapItem.course_offering_id == offering_id).first() is not None
+
+    if has_enrollments or has_specs or has_roadmap:
+        raise ValueError("Cannot delete an offering that already has enrollments, specs, or roadmap data. Deactivate it instead.")
+
+    db.delete(o)
+    db.commit()
+
+
 # -------------------------
 # Enrollments + Events (OPEN or KEY enrollment)
 # -------------------------
@@ -472,7 +578,10 @@ def enroll_user_open_offering(
 def get_enrollment(db: Session, enrollment_id: UUID) -> Optional[Enrollment]:
     return (
         db.query(Enrollment)
-        .options(joinedload(Enrollment.offering).joinedload(CourseOffering.course))
+        .options(
+            joinedload(Enrollment.offering).joinedload(CourseOffering.course),
+            joinedload(Enrollment.user).joinedload(User.profile),
+        )
         .filter(Enrollment.id == enrollment_id)
         .one_or_none()
     )
@@ -489,7 +598,8 @@ def list_enrollments(
     qry = (
         db.query(Enrollment)
         .options(
-            joinedload(Enrollment.offering).joinedload(CourseOffering.course)
+            joinedload(Enrollment.offering).joinedload(CourseOffering.course),
+            joinedload(Enrollment.user).joinedload(User.profile),
         )
     )
 
@@ -556,7 +666,10 @@ def list_enrollment_events(
 def _get_enrollment_with_offering_and_course(db: Session, enrollment_id: UUID) -> Optional[Enrollment]:
     return (
         db.query(Enrollment)
-        .options(joinedload(Enrollment.offering).joinedload(CourseOffering.course))
+        .options(
+            joinedload(Enrollment.offering).joinedload(CourseOffering.course),
+            joinedload(Enrollment.user).joinedload(User.profile),
+        )
         .filter(Enrollment.id == enrollment_id)
         .one_or_none()
     )

@@ -5,6 +5,7 @@ import { useCourseStore } from '../state/courseStore';
 import { useAuth } from '../state/AuthContext';
 import { chatApi, ingestionApi, enrollmentApi, courseApi } from '../services/api';
 import MarkdownMessage from "../components/markdownMessage";
+import TopToolsDrawer, { EnrollmentCourseContext } from '../components/tools/TopToolsDrawer';
 
 interface Citation {
   id?: string;
@@ -41,6 +42,23 @@ interface ChatHistory {
 
 interface ChatPageProps {
   publicMode?: boolean;
+}
+
+interface EnrollmentRow {
+  id?: string;
+  status?: string;
+  offering?: {
+    id?: string;
+    course_code?: string;
+    course?: {
+      course_name?: string;
+    };
+  };
+}
+
+interface EnrolledCourseOption {
+  code: string;
+  name: string;
 }
 
 const PUBLIC_PREVIEW_COURSE = {
@@ -117,7 +135,9 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   const [showPublicLimitModal, setShowPublicLimitModal] = useState(false);
   const [currentChatTitle, setCurrentChatTitle] = useState(DEFAULT_CHAT_TITLE);
   const [showCourseDropdown, setShowCourseDropdown] = useState(false);
-  const [enrolledCourses, setEnrolledCourses] = useState<any[]>([]);
+  const [enrolledCourses, setEnrolledCourses] = useState<EnrolledCourseOption[]>([]);
+  const [enrollmentContextByCourse, setEnrollmentContextByCourse] = useState<Record<string, EnrollmentCourseContext>>({});
+  const [showToolsDrawer, setShowToolsDrawer] = useState(false);
   const [showEnrollModal, setShowEnrollModal] = useState(false);
   const [enrollmentKey, setEnrollmentKey] = useState('');
   const [searchCourseCode, setSearchCourseCode] = useState('');
@@ -135,6 +155,23 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   const isDemoBackendAvailable = Boolean(demoToken);
   const useLocalDemo = isPublicPreview && !isDemoBackendAvailable;
   const authToken = isPublicPreview ? (isDemoBackendAvailable ? demoToken : null) : token;
+  const canOpenStudentTools = !isPublicPreview && (user?.role === 'student' || user?.role === 'admin');
+  const canOpenLecturerWorkspace = !isPublicPreview && user?.role === 'admin';
+  const toolsButtonLabel = canOpenStudentTools && canOpenLecturerWorkspace
+    ? 'Tools & Workspace'
+    : canOpenLecturerWorkspace
+    ? 'Workspace'
+    : 'Tools';
+  const activeEnrollmentContext = courseCode && courseCode !== 'GENERAL'
+    ? enrollmentContextByCourse[courseCode] || null
+    : null;
+
+  useEffect(() => {
+    if (isPublicPreview) return;
+    if (user?.role === 'lecturer') {
+      navigate('/lecturer', { replace: true });
+    }
+  }, [isPublicPreview, navigate, user?.role]);
 
   const getCitationRole = (citation: any): string => {
     const roleCandidate = citation?.role || citation?.uploader_role || citation?.source_role || citation?.metadata?.uploader_role;
@@ -167,6 +204,73 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
     }
     return trimmed.length > 40 ? `${trimmed.slice(0, 40).trim()}…` : trimmed;
   };
+
+  const normalizeEnrollments = (rows: EnrollmentRow[]) => {
+    const uniqueCourses = new Map<string, EnrolledCourseOption>();
+    const contextMap: Record<string, EnrollmentCourseContext> = {};
+
+    for (const row of rows) {
+      if (row.status !== 'active') continue;
+
+      const offering = row.offering;
+      if (!offering?.course_code || !row.id) continue;
+
+      const code = offering.course_code;
+      const name = offering.course?.course_name || code;
+
+      if (!uniqueCourses.has(code)) {
+        uniqueCourses.set(code, { code, name });
+      }
+
+      if (!contextMap[code]) {
+        contextMap[code] = {
+          courseCode: code,
+          courseName: name,
+          enrollmentId: String(row.id),
+          offeringId: offering.id ? String(offering.id) : undefined,
+        };
+      }
+    }
+
+    return {
+      courses: Array.from(uniqueCourses.values()),
+      contextMap,
+    };
+  };
+
+  const refreshEnrolledCourseData = async () => {
+    if (isPublicPreview || !token || !user?.id) return;
+    const response = await enrollmentApi.list(token, { user_id: user.id });
+    const rows = Array.isArray(response)
+      ? (response as EnrollmentRow[])
+      : (response?.items || response?.results || response?.enrollments || []) as EnrollmentRow[];
+    const normalized = normalizeEnrollments(rows);
+    setEnrolledCourses(normalized.courses);
+    setEnrollmentContextByCourse(normalized.contextMap);
+  };
+
+  useEffect(() => {
+    if (isPublicPreview) return;
+    try {
+      const raw = localStorage.getItem('edusmart_enrollment_context_v1');
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        setEnrollmentContextByCourse(parsed as Record<string, EnrollmentCourseContext>);
+      }
+    } catch (cacheError) {
+      console.warn('Failed to hydrate enrollment context cache', cacheError);
+    }
+  }, [isPublicPreview]);
+
+  useEffect(() => {
+    if (isPublicPreview) return;
+    if (Object.keys(enrollmentContextByCourse).length === 0) {
+      localStorage.removeItem('edusmart_enrollment_context_v1');
+      return;
+    }
+    localStorage.setItem('edusmart_enrollment_context_v1', JSON.stringify(enrollmentContextByCourse));
+  }, [enrollmentContextByCourse, isPublicPreview]);
 
   // ==================== Load sessions on mount (NO POST on page load) ====================
   useEffect(() => {
@@ -248,31 +352,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
 
     const loadEnrolledCourses = async () => {
       try {
-        const enrollments = await enrollmentApi.list(token, { user_id: user.id });
-        console.log("Raw enrollments:", enrollments);
-
-        const uniqueCourses = new Map<string, { code: string; name: string }>();
-
-        for (const enrollment of enrollments) {
-          console.log("Processing enrollment:", enrollment);
-
-          if (enrollment.status !== "active") continue;
-
-          const offering = enrollment.offering;
-          if (!offering) continue;
-
-          const code = offering.course_code;
-          const name = offering.course?.course_name ?? code;
-
-          if (!uniqueCourses.has(code)) {
-            uniqueCourses.set(code, { code, name });
-          }
-        }
-
-        const courses = Array.from(uniqueCourses.values());
-        console.log("Enrolled courses:", courses);
-        setEnrolledCourses(courses);
-
+        await refreshEnrolledCourseData();
       } catch (err) {
         console.error("Failed to load enrolled courses:", err);
       }
@@ -667,6 +747,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
   const handleLogout = () => {
     logout();
     setShowSettingsMenu(false);
+    setShowToolsDrawer(false);
     navigate('/login');
   };
 
@@ -765,23 +846,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
       setShowEnrollModal(false);
       setShowEnrollSuccess(true);
       setEnrollmentKey('');
-      // Reload enrolled courses
-      const enrollments = await enrollmentApi.list(token, { user_id: user?.id });
-      const uniqueCourses = new Map();
-      for (const e of enrollments) {
-        if (e.status === 'active' && e.offering) {
-          const code = e.offering.course_code;
-          if (!uniqueCourses.has(code)) {
-            let name = code;
-            try {
-              const details = await courseApi.get(token, code);
-              name = details.course_name || code;
-            } catch (err) {}
-            uniqueCourses.set(code, { code, name });
-          }
-        }
-      }
-      setEnrolledCourses(Array.from(uniqueCourses.values()));
+      await refreshEnrolledCourseData();
     } catch (err: any) {
       setEnrollError(err?.message || 'Failed to enroll');
     } finally {
@@ -806,23 +871,7 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
       setShowEnrollSuccess(true);
       setSearchCourseCode('');
       setSearchResults([]);
-      // Reload enrolled courses
-      const enrollments = await enrollmentApi.list(token, { user_id: user?.id });
-      const uniqueCourses = new Map();
-      for (const e of enrollments) {
-        if (e.status === 'active' && e.offering) {
-          const code = e.offering.course_code;
-          if (!uniqueCourses.has(code)) {
-            let name = code;
-            try {
-              const details = await courseApi.get(token, code);
-              name = details.course_name || code;
-            } catch (err) {}
-            uniqueCourses.set(code, { code, name });
-          }
-        }
-      }
-      setEnrolledCourses(Array.from(uniqueCourses.values()));
+      await refreshEnrolledCourseData();
     } catch (err: any) {
       setEnrollError(err?.message || 'Failed to enroll');
     } finally {
@@ -1070,8 +1119,23 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
               </div>
             </div>
 
-            {/* Settings Menu */}
-            <div className="relative">
+            {/* Header Actions */}
+            <div className="flex items-center gap-2">
+              {!isPublicPreview && (canOpenStudentTools || canOpenLecturerWorkspace) && (
+                <button
+                  onClick={() => {
+                    setShowSettingsMenu(false);
+                    setShowToolsDrawer(true);
+                  }}
+                  className="px-3 py-2 rounded-xl border border-blue-200 bg-blue-50 text-blue-700 text-sm font-semibold hover:bg-blue-100 transition"
+                  title="Open learning tools"
+                >
+                  {toolsButtonLabel}
+                </button>
+              )}
+
+              {/* Settings Menu */}
+              <div className="relative">
               {isPublicPreview ? (
                 <div className="flex items-center gap-3">
                   <button
@@ -1144,9 +1208,25 @@ export default function ChatPage({ publicMode = false }: ChatPageProps = {}) {
                   )}
                 </>
               )}
+              </div>
             </div>
           </div>
         </div>
+
+        {!isPublicPreview && (canOpenStudentTools || canOpenLecturerWorkspace) && (
+          <TopToolsDrawer
+            open={showToolsDrawer}
+            onClose={() => setShowToolsDrawer(false)}
+            token={token}
+            role={user?.role}
+            userId={user?.id}
+            selectedCourseCode={courseCode}
+            selectedCourseName={courseName}
+            activeEnrollmentContext={activeEnrollmentContext}
+            enrollmentContextByCourse={enrollmentContextByCourse}
+            enrolledCourses={enrolledCourses}
+          />
+        )}
 
         {/* Messages Container */}
         <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 sm:px-8 py-8">

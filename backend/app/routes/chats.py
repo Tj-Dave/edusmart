@@ -163,7 +163,9 @@ def _extract_latest_assistant_message_id(messages: list) -> Optional[int]:
                 best = int(mid)
     return best
 
+
 router = APIRouter(prefix="/chats", tags=["chats"])
+
 
 @router.post("", response_model=ChatSessionOut)
 def create_chat(
@@ -203,7 +205,6 @@ def list_chats(
     )
 
 
-
 @router.get("/{session_id}", response_model=ChatSessionDetailOut)
 def get_chat_with_messages(
     session_id: UUID,
@@ -237,7 +238,6 @@ async def send_message(
         user_id=str(current_user.id),
         session_id=session_id,
     )
-
 
 # =========================
 # ✅ NEW: Atomic chat query

@@ -211,13 +211,177 @@ BEGIN
     END IF;
 END$$;
 
+-- ------------------------------------------------------------
+-- Practicals upgrade (kept here so maindb.sql is self-contained)
+-- ------------------------------------------------------------
+DO $$
+BEGIN
+        -- Extend enum only when the enum exists in this database.
+        IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'assessment_task_type') THEN
+                ALTER TYPE assessment_task_type ADD VALUE IF NOT EXISTS 'case_study';
+                ALTER TYPE assessment_task_type ADD VALUE IF NOT EXISTS 'simulation';
+                ALTER TYPE assessment_task_type ADD VALUE IF NOT EXISTS 'field_task';
+        END IF;
+END$$;
+
+ALTER TABLE IF EXISTS roadmap_assessment_tasks
+    ADD COLUMN IF NOT EXISTS practical_brief TEXT,
+    ADD COLUMN IF NOT EXISTS required_tools TEXT,
+    ADD COLUMN IF NOT EXISTS expected_artifact TEXT,
+    ADD COLUMN IF NOT EXISTS safety_notes TEXT,
+    ADD COLUMN IF NOT EXISTS rubric_json JSONB;
+
+ALTER TABLE IF EXISTS enrollment_task_results
+    ADD COLUMN IF NOT EXISTS artifact_url TEXT,
+    ADD COLUMN IF NOT EXISTS reflection_text TEXT,
+    ADD COLUMN IF NOT EXISTS rubric_scores_json JSONB;
+
+-- ------------------------------------------------------------
+-- Gamification upgrade (kept here so maindb.sql is self-contained)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS student_gamification_profiles (
+    user_id              UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    xp_total             INTEGER NOT NULL DEFAULT 0,
+    level                INTEGER NOT NULL DEFAULT 1,
+    streak_days          INTEGER NOT NULL DEFAULT 0,
+    last_activity_date   TIMESTAMPTZ NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT gamification_profile_xp_nonneg CHECK (xp_total >= 0),
+    CONSTRAINT gamification_profile_level_min_1 CHECK (level >= 1),
+    CONSTRAINT gamification_profile_streak_nonneg CHECK (streak_days >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS student_badges (
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    badge_code           TEXT NOT NULL,
+    title                TEXT NOT NULL,
+    description          TEXT NULL,
+    awarded_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT student_badges_code_not_empty CHECK (length(trim(badge_code)) > 0),
+    CONSTRAINT student_badges_title_not_empty CHECK (length(trim(title)) > 0),
+    CONSTRAINT uq_student_badge_user_code UNIQUE (user_id, badge_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_student_badges_user ON student_badges(user_id);
+CREATE INDEX IF NOT EXISTS idx_student_badges_code ON student_badges(badge_code);
+
+DO $$
+BEGIN
+        IF to_regclass('public.xp_events') IS NULL THEN
+                IF to_regclass('public.enrollments') IS NOT NULL THEN
+                        EXECUTE '
+                                CREATE TABLE xp_events (
+                                    id                   BIGSERIAL PRIMARY KEY,
+                                    user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                                    enrollment_id        UUID NULL REFERENCES enrollments(id) ON DELETE SET NULL,
+                                    event_type           TEXT NOT NULL,
+                                    xp_delta             INTEGER NOT NULL,
+                                    reason               TEXT NULL,
+                                    metadata_json        JSONB NULL,
+                                    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+                                    CONSTRAINT xp_events_type_not_empty CHECK (length(trim(event_type)) > 0),
+                                    CONSTRAINT xp_events_delta_nonzero CHECK (xp_delta <> 0)
+                                )';
+                ELSE
+                        EXECUTE '
+                                CREATE TABLE xp_events (
+                                    id                   BIGSERIAL PRIMARY KEY,
+                                    user_id              UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                                    enrollment_id        UUID NULL,
+                                    event_type           TEXT NOT NULL,
+                                    xp_delta             INTEGER NOT NULL,
+                                    reason               TEXT NULL,
+                                    metadata_json        JSONB NULL,
+                                    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+                                    CONSTRAINT xp_events_type_not_empty CHECK (length(trim(event_type)) > 0),
+                                    CONSTRAINT xp_events_delta_nonzero CHECK (xp_delta <> 0)
+                                )';
+                END IF;
+        END IF;
+
+        -- If enrollments exists now (or later rerun), ensure FK is present.
+        IF to_regclass('public.enrollments') IS NOT NULL
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM pg_constraint
+                 WHERE conname = 'xp_events_enrollment_id_fkey'
+             ) THEN
+                ALTER TABLE xp_events
+                    ADD CONSTRAINT xp_events_enrollment_id_fkey
+                    FOREIGN KEY (enrollment_id) REFERENCES enrollments(id) ON DELETE SET NULL;
+        END IF;
+END$$;
+
+CREATE INDEX IF NOT EXISTS idx_xp_events_user ON xp_events(user_id);
+CREATE INDEX IF NOT EXISTS idx_xp_events_enrollment ON xp_events(enrollment_id);
+CREATE INDEX IF NOT EXISTS idx_xp_events_type ON xp_events(event_type);
+
+DO $$
+BEGIN
+        IF to_regclass('public.student_gamification_profiles') IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_student_gamification_profiles_updated_at') THEN
+                CREATE TRIGGER trg_student_gamification_profiles_updated_at
+                BEFORE UPDATE ON student_gamification_profiles
+                FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+        END IF;
+END$$;
+
 COMMIT;
 
 -- ------------------------------------------------------------
 -- Relationship summary (for your teammate)
+-- ------------------------------------------------------------
+-- Notification System Tables
+-- ------------------------------------------------------------
+
+-- Enum for notification channels
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notification_channel') THEN
+        CREATE TYPE notification_channel AS ENUM ('in_app', 'email', 'push');
+    END IF;
+END$$;
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type varchar(64) NOT NULL,
+    title varchar(255) NOT NULL,
+    message text NOT NULL,
+    channel notification_channel NOT NULL,
+    is_read boolean NOT NULL DEFAULT false,
+    metadata jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS notification_templates (
+    id serial PRIMARY KEY,
+    event_type varchar(64) NOT NULL UNIQUE,
+    title_template varchar(255) NOT NULL,
+    body_template text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS notification_preferences (
+    user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    assignment_email boolean NOT NULL DEFAULT true,
+    assignment_push boolean NOT NULL DEFAULT true,
+    marketing_email boolean NOT NULL DEFAULT true,
+    payment_email boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
 -- ------------------------------------------------------------
 -- users (1) ── (1) user_profiles
 -- users (1) ── (many) auth_sessions
 -- users (1) ── (many) chat_sessions
 -- chat_sessions (1) ── (many) chat_messages
 -- chat_sessions (1) ── (1) memory_state
+-- users (1) ── (1) student_gamification_profiles
+-- users (1) ── (many) student_badges
+-- users (1) ── (many) xp_events
