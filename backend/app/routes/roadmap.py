@@ -21,6 +21,7 @@ from app.services.roadmap_service import (
     activate_roadmap,
     archive_roadmap_item,
     create_roadmap_item,
+    delete_roadmap_item,
     generate_roadmap_from_spec,
     list_roadmap_items,
     update_roadmap_item,
@@ -135,3 +136,15 @@ def archive_roadmap_item_endpoint(
     except Exception as err:
         raise to_http_exception(err)
 
+
+@router.delete("/roadmap-items/{item_id}", response_model=GenericActionOut)
+def delete_roadmap_item_endpoint(
+    item_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        delete_roadmap_item(db, item_id=item_id, actor=current_user)
+        return {"ok": True, "message": "Roadmap item deleted"}
+    except Exception as err:
+        raise to_http_exception(err)

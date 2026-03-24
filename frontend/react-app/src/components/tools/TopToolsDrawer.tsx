@@ -126,6 +126,10 @@ const normalizeTaskResult = (raw: any): TaskResult => ({
   score: asNumber(raw?.score),
   feedback: raw?.feedback ?? null,
   evidence_url: raw?.evidence_url ?? null,
+  rubric_scores_json:
+    raw?.rubric_scores_json && typeof raw.rubric_scores_json === 'object'
+      ? raw.rubric_scores_json
+      : null,
   payload: raw?.payload,
   submitted_at: raw?.submitted_at ?? null,
   graded_at: raw?.graded_at ?? null,

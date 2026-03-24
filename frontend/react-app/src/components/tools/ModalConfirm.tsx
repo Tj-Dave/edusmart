@@ -4,8 +4,11 @@ interface ModalConfirmProps {
   description: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  secondaryLabel?: string;
   danger?: boolean;
+  secondaryDanger?: boolean;
   onConfirm: () => void;
+  onSecondary?: () => void;
   onCancel: () => void;
   loading?: boolean;
 }
@@ -16,8 +19,11 @@ export default function ModalConfirm({
   description,
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
+  secondaryLabel,
   danger = false,
+  secondaryDanger = false,
   onConfirm,
+  onSecondary,
   onCancel,
   loading = false,
 }: ModalConfirmProps) {
@@ -32,10 +38,25 @@ export default function ModalConfirm({
           <button
             type="button"
             onClick={onCancel}
+            disabled={loading}
             className="rounded-xl border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
           >
             {cancelLabel}
           </button>
+          {secondaryLabel && onSecondary && (
+            <button
+              type="button"
+              onClick={onSecondary}
+              disabled={loading}
+              className={`rounded-xl px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                secondaryDanger
+                  ? 'border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                  : 'border border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              {loading ? 'Working...' : secondaryLabel}
+            </button>
+          )}
           <button
             type="button"
             onClick={onConfirm}

@@ -279,14 +279,17 @@ export const chatApi = {
 
 // ==================== Ingestion Endpoints ====================
 export const ingestionApi = {
-  uploadDocument: async (token: string, file: File) => {
+  uploadDocument: async (token: string, file: File, courseId?: string) => {
     const formData = new FormData();
     formData.append('file', file);
 
     const headers: Record<string, string> = {};
     if (token) headers.Authorization = `Bearer ${token}`;
 
-    const response = await fetch(`${API_BASE_URL}/ingest/upload`, {
+    const query = new URLSearchParams();
+    if (courseId) query.append('course_id', courseId);
+
+    const response = await fetch(`${API_BASE_URL}/ingest/upload?${query}`, {
       method: 'POST',
       headers,
       body: formData,
@@ -537,6 +540,37 @@ export const offeringApi = {
     if (params?.limit) query.append('limit', String(params.limit));
     if (params?.offset) query.append('offset', String(params.offset));
     const response = await fetch(`${API_BASE_URL}/courses/offerings?${query}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  update: async (token: string, offeringId: string, data: {
+    course_code?: string;
+    term?: string;
+    year?: number | null;
+    cohort?: string | null;
+    section?: string | null;
+    is_active?: boolean;
+    enrollment_key?: string | null;
+    auto_generate_enrollment_key?: boolean;
+  }) => {
+    const response = await fetch(`${API_BASE_URL}/courses/offerings/${offeringId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(data),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  delete: async (token: string, offeringId: string) => {
+    const response = await fetch(`${API_BASE_URL}/courses/offerings/${offeringId}`, {
+      method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!response.ok) throw new Error(await safeParseError(response));
@@ -860,6 +894,15 @@ export const roadmapAdminApi = {
     return response.json();
   },
 
+  submitSpecReview: async (token: string, specId: string) => {
+    const response = await fetch(`${API_BASE_URL}/specs/${specId}/submit-review`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
   getSpec: async (token: string, specId: string) => {
     const response = await fetch(`${API_BASE_URL}/specs/${specId}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -935,6 +978,15 @@ export const roadmapAdminApi = {
   archiveRoadmapItem: async (token: string, itemId: string) => {
     const response = await fetch(`${API_BASE_URL}/roadmap-items/${itemId}/archive`, {
       method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  deleteRoadmapItem: async (token: string, itemId: string) => {
+    const response = await fetch(`${API_BASE_URL}/roadmap-items/${itemId}`, {
+      method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!response.ok) throw new Error(await safeParseError(response));

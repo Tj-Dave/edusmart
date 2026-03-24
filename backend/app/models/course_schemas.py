@@ -64,6 +64,17 @@ class OfferingCreate(BaseModel):
     auto_generate_enrollment_key: bool = False
 
 
+class OfferingUpdate(BaseModel):
+    course_code: Optional[str] = Field(default=None, min_length=3, max_length=32)
+    term: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    year: Optional[int] = Field(default=None, ge=1990, le=2100)
+    cohort: Optional[str] = Field(default=None, max_length=64)
+    section: Optional[str] = Field(default=None, max_length=64)
+    is_active: Optional[bool] = None
+    enrollment_key: Optional[str] = Field(default=None, max_length=120)
+    auto_generate_enrollment_key: Optional[bool] = None
+
+
 
 class OfferingOut(BaseModel):
     id: UUID
@@ -82,6 +93,11 @@ class OfferingOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ActionOut(BaseModel):
+    ok: bool
+    message: str
 
 # -------------------------
 # Offering Enrollment Key Update
@@ -130,6 +146,23 @@ class EnrollmentCreate(BaseModel):
     note: Optional[str] = None
 
 
+class EnrollmentUserProfileOut(BaseModel):
+    full_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class EnrollmentUserOut(BaseModel):
+    id: UUID
+    username: str
+    email: Optional[str] = None
+    profile: Optional[EnrollmentUserProfileOut] = None
+
+    class Config:
+        from_attributes = True
+
+
 class EnrollmentOut(BaseModel):
     id: UUID
     offering_id: UUID
@@ -140,6 +173,7 @@ class EnrollmentOut(BaseModel):
     created_at: Any
     updated_at: Any
     offering: Optional[OfferingOut] = None
+    user: Optional[EnrollmentUserOut] = None
 
     class Config:
         from_attributes = True

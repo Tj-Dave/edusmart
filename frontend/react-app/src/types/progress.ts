@@ -21,6 +21,7 @@ export interface TaskResult {
   score?: number | null;
   feedback?: string | null;
   evidence_url?: string | null;
+  rubric_scores_json?: Record<string, unknown> | null;
   payload?: unknown;
   submitted_at?: string | null;
   graded_at?: string | null;

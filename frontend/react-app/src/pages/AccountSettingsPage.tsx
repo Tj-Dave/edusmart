@@ -419,7 +419,7 @@ export default function AccountSettingsPage() {
           )}
         </div>
         <div className="bg-white rounded-lg shadow-md p-6 mb-6 border-l-4 border-red-500">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">⚠️ Danger Zone</h2>
+          
           
           <div className="space-y-4">
             <div>
@@ -435,7 +435,7 @@ export default function AccountSettingsPage() {
                     : 'bg-red-100 text-red-700 hover:bg-red-200'
                 }`}
               >
-                {showDeleteConfirm ? '🗑️ Confirm Delete All Chats' : '🗑️ Delete All Chats'}
+                {showDeleteConfirm ? 'Confirm Delete All Chats' : 'Delete All Chats'}
               </button>
               {showDeleteConfirm && (
                 <p className="text-xs text-red-600 mt-2">⚠️ Click again to confirm</p>
@@ -449,9 +449,9 @@ export default function AccountSettingsPage() {
               </p>
               <button
                 onClick={handleLogout}
-                className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 font-medium transition"
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium transition"
               >
-                🚪 Logout
+                Logout
               </button>
             </div>
           </div>
@@ -459,7 +459,7 @@ export default function AccountSettingsPage() {
 
         {/* About Section */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-4">ℹ️ About EduSmart</h2>
+          <h2 className="text-xl font-semibold text-gray-900 mb-4">About EduSmart</h2>
           
           <div className="space-y-3 text-sm text-gray-700">
             <p>
@@ -476,7 +476,7 @@ export default function AccountSettingsPage() {
             </p>
             <div className="mt-4 pt-4 border-t border-gray-200">
               <p className="text-xs text-gray-500">
-                © 2024 EduSmart. All rights reserved.
+                © 2025 EduSmart. All rights reserved.
               </p>
             </div>
           </div>

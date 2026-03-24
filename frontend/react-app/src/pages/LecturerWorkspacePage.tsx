@@ -15,11 +15,13 @@ import MetricCard from '../components/lecturer/MetricCard';
 import SectionCard from '../components/lecturer/SectionCard';
 import LecturerAssistantPanel from '../components/lecturer/LecturerAssistantPanel';
 import InlineErrorBanner from '../components/tools/InlineErrorBanner';
+import ModalConfirm from '../components/tools/ModalConfirm';
 import ProgressBar from '../components/tools/ProgressBar';
 import ScoreChip from '../components/tools/ScoreChip';
 import StatusPill from '../components/tools/StatusPill';
 import RoadmapNode, { type RoadmapNodeData } from '../components/lecturer/RoadmapNode';
 import SpecVisualEditor, { type VisualSpecState } from '../components/lecturer/SpecVisualEditor';
+import SpecReadonlyView from '../components/lecturer/SpecReadonlyView';
 
 interface CourseRecord {
   code: string;
@@ -37,6 +39,9 @@ interface OfferingRecord {
   cohort?: string;
   isActive: boolean;
   enrollmentKey?: string;
+  enrollmentKeyGenerated: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 interface EnrollmentRecord {
@@ -100,6 +105,10 @@ interface TaskRow {
   weight?: number | null;
   orderIndex?: number | null;
   isActive: boolean;
+  attemptsCount?: number;
+  selectedAttemptNo?: number | null;
+  selectedScore?: number | null;
+  latestStatus?: string | null;
   results: TaskResultRow[];
 }
 
@@ -126,10 +135,13 @@ interface StudentSummaryRow {
   enrollmentId: string;
   fullName: string;
   email: string;
+  status: string;
   progressPercent: number;
   avgScore?: number | null;
   itemsCompleted: number;
   totalItems: number;
+  bestItemTitle?: string | null;
+  bestItemScore?: number | null;
 }
 
 interface TaskDraft {
@@ -178,6 +190,23 @@ const defaultTaskDraft = (): TaskDraft => ({
   weight: '1',
 });
 
+const createEmptyVisualSpec = (): VisualSpecState => ({
+  header: {
+    course_name: '',
+    course_code: '',
+    level: '',
+    credit_units: '',
+    prerequisites: '',
+    description: '',
+    rationale: '',
+    aim: '',
+    lectures: '',
+    practicals: '',
+  },
+  learning_outcomes: [],
+  assessment_plan: [],
+});
+
 const asArray = <T,>(value: unknown): T[] => {
   if (Array.isArray(value)) return value as T[];
   return [];
@@ -187,6 +216,39 @@ const asNumber = (value: unknown): number | null => {
   if (value === null || value === undefined || value === '') return null;
   const next = Number(value);
   return Number.isFinite(next) ? next : null;
+};
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const titleCase = (value: string): string =>
+  value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+
+const toDisplayName = (...values: Array<unknown>): string => {
+  for (const value of values) {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (!text || UUID_PATTERN.test(text)) continue;
+    if (text.includes('@')) {
+      const localPart = text.split('@')[0]?.trim();
+      if (!localPart) continue;
+      return titleCase(localPart.replace(/[._-]+/g, ' '));
+    }
+    if (/[._-]/.test(text) && !text.includes(' ')) {
+      return titleCase(text.replace(/[._-]+/g, ' '));
+    }
+    return text;
+  }
+  return 'Student';
+};
+
+const formatDateLabel = (value?: string): string => {
+  if (!value) return 'Recently synced';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'Recently synced';
+  return parsed.toLocaleString();
 };
 
 const TASK_TYPE_OPTIONS = [
@@ -202,6 +264,8 @@ const TASK_TYPE_OPTIONS = [
   'peer_review',
   'other',
 ];
+
+const ROADMAP_CONTEXT_TABS: LecturerTab[] = ['roadmap', 'students', 'assessments', 'uploads', 'assistant'];
 
 const defaultGradeDraft = (): GradeDraft => ({
   score: '',
@@ -222,6 +286,87 @@ const parseOptionalJsonObject = (value: string): Record<string, unknown> | null 
   } catch (error) {
     throw new Error('Rubric JSON is invalid. Provide a valid JSON object.');
   }
+};
+
+const buildVisualSpecState = (raw: unknown): VisualSpecState => {
+  const parsed = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, any>
+    : {};
+  const header = parsed.course_header && typeof parsed.course_header === 'object'
+    ? parsed.course_header as Record<string, any>
+    : {};
+  const contactHours = header.contact_hours && typeof header.contact_hours === 'object'
+    ? header.contact_hours as Record<string, any>
+    : {};
+
+  return {
+    header: {
+      course_name: header.course_name || '',
+      course_code: header.course_code || '',
+      level: header.level || '',
+      credit_units: header.credit_units != null ? String(header.credit_units) : '',
+      prerequisites: Array.isArray(header.prerequisites)
+        ? header.prerequisites.join(', ')
+        : (header.prerequisites || ''),
+      description: header.description || '',
+      rationale: header.rationale || '',
+      aim: header.aim || '',
+      lectures: contactHours.lectures != null ? String(contactHours.lectures) : '',
+      practicals: contactHours.practicals != null ? String(contactHours.practicals) : '',
+    },
+    learning_outcomes: Array.isArray(parsed.learning_outcomes) ? parsed.learning_outcomes : [],
+    assessment_plan: Array.isArray(parsed.assessment_plan) ? parsed.assessment_plan : [],
+  };
+};
+
+const buildSpecJsonText = (spec: VisualSpecState, existingJsonText: string): string => {
+  let current: Record<string, unknown> = {};
+
+  if (existingJsonText.trim()) {
+    try {
+      const parsed = JSON.parse(existingJsonText);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        current = parsed as Record<string, unknown>;
+      }
+    } catch {
+      current = {};
+    }
+  }
+
+  const existingHeader = current.course_header && typeof current.course_header === 'object'
+    ? current.course_header as Record<string, unknown>
+    : {};
+
+  return JSON.stringify(
+    {
+      ...current,
+      course_header: {
+        ...existingHeader,
+        course_name: spec.header.course_name,
+        course_code: spec.header.course_code,
+        level: spec.header.level,
+        credit_units: spec.header.credit_units ? Number(spec.header.credit_units) : null,
+        prerequisites: spec.header.prerequisites
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+        description: spec.header.description,
+        rationale: spec.header.rationale,
+        aim: spec.header.aim,
+        contact_hours: {
+          lectures: spec.header.lectures ? Number(spec.header.lectures) : null,
+          practicals: spec.header.practicals ? Number(spec.header.practicals) : null,
+          total:
+            (spec.header.lectures ? Number(spec.header.lectures) : 0) +
+              (spec.header.practicals ? Number(spec.header.practicals) : 0) || null,
+        },
+      },
+      learning_outcomes: spec.learning_outcomes,
+      assessment_plan: spec.assessment_plan,
+    },
+    null,
+    2
+  );
 };
 
 const parseOptionalRubricScores = (value: string): Record<string, number> | null => {
@@ -346,6 +491,9 @@ const normalizeOffering = (raw: any): OfferingRecord | null => {
     cohort: raw?.cohort || undefined,
     isActive: typeof raw?.is_active === 'boolean' ? raw.is_active : true,
     enrollmentKey: raw?.enrollment_key || undefined,
+    enrollmentKeyGenerated: raw?.enrollment_key_generated === true,
+    createdAt: raw?.created_at || undefined,
+    updatedAt: raw?.updated_at || undefined,
   };
 };
 
@@ -354,11 +502,21 @@ const normalizeEnrollment = (raw: any): EnrollmentRecord | null => {
   const userId = raw?.user_id?.toString?.() || raw?.user?.id?.toString?.() || '';
   if (!id || !userId) return null;
 
+  const email = raw?.user?.email || raw?.email || '';
+  const fullName = toDisplayName(
+    raw?.user?.profile?.full_name,
+    raw?.user?.full_name,
+    raw?.full_name,
+    raw?.user?.username,
+    raw?.username,
+    email
+  );
+
   return {
     id,
     userId,
-    fullName: raw?.user?.full_name || raw?.user?.username || userId,
-    email: raw?.user?.email || '',
+    fullName,
+    email,
     status: raw?.status || 'active',
   };
 };
@@ -394,9 +552,21 @@ const normalizeTask = (raw: any): TaskRow => ({
   latePenaltyPercent: asNumber(raw?.late_penalty_percent),
   maxScore: asNumber(raw?.max_score),
   weight: asNumber(raw?.weight),
-  orderIndex: asNumber(raw?.order_index),
+  orderIndex: asNumber(raw?.order_index ?? raw?.display_order),
   isActive: raw?.is_active !== false,
+  attemptsCount: undefined,
+  selectedAttemptNo: null,
+  selectedScore: null,
+  latestStatus: null,
   results: parseRows<any>(raw?.results, ['items', 'results']).map(normalizeTaskResult),
+});
+
+const normalizeTaskSummary = (raw: any) => ({
+  taskId: raw?.task_id?.toString?.() || '',
+  selectedScore: asNumber(raw?.selected_score),
+  selectedAttemptNo: asNumber(raw?.selected_attempt_no),
+  attemptsCount: asNumber(raw?.attempts_count) ?? 0,
+  latestStatus: raw?.latest_status || null,
 });
 
 const normalizeProgress = (raw: any): RoadmapProgressRow => ({
@@ -411,14 +581,58 @@ const normalizeProgress = (raw: any): RoadmapProgressRow => ({
 const normalizeRoadmapItem = (raw: any): RoadmapItemRow => ({
   id: raw?.id?.toString?.() || raw?.item_id?.toString?.() || `${Date.now()}-${Math.random()}`,
   title: raw?.title || raw?.name || 'Untitled roadmap item',
-  description: raw?.description || '',
+  description: raw?.description || raw?.key_content || raw?.teaching_activity || '',
   weekNo: asNumber(raw?.week_no),
   estimatedHours: asNumber(raw?.estimated_hours),
   status: raw?.status || 'draft',
-  orderIndex: asNumber(raw?.order_index),
-  tasks: parseRows<any>(raw?.tasks, ['items', 'results']).map(normalizeTask),
+  orderIndex: asNumber(raw?.order_index ?? raw?.sequence_no),
+  tasks: parseRows<any>(raw?.assessment_tasks ?? raw?.tasks, ['items', 'results', 'assessment_tasks'])
+    .map(normalizeTask)
+    .sort((left, right) => {
+      const leftOrder = left.orderIndex ?? Number.MAX_SAFE_INTEGER;
+      const rightOrder = right.orderIndex ?? Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return left.title.localeCompare(right.title);
+    }),
   progress: raw?.progress ? normalizeProgress(raw.progress) : null,
 });
+
+const compareRoadmapItems = (left: RoadmapItemRow, right: RoadmapItemRow) => {
+  const leftKey = left.weekNo ?? left.orderIndex ?? Number.MAX_SAFE_INTEGER;
+  const rightKey = right.weekNo ?? right.orderIndex ?? Number.MAX_SAFE_INTEGER;
+  if (leftKey !== rightKey) return leftKey - rightKey;
+  return left.title.localeCompare(right.title);
+};
+
+const normalizeRoadmapEntry = (raw: any): RoadmapItemRow => {
+  const itemSource = raw?.item ?? raw;
+  const normalized = normalizeRoadmapItem(itemSource);
+  const taskSummaries = parseRows<any>(raw?.task_summaries, ['items', 'results', 'task_summaries'])
+    .map(normalizeTaskSummary)
+    .filter((entry) => entry.taskId);
+
+  if (taskSummaries.length === 0 && !raw?.progress) {
+    return normalized;
+  }
+
+  const taskSummaryMap = new Map(taskSummaries.map((entry) => [entry.taskId, entry]));
+
+  return {
+    ...normalized,
+    progress: raw?.progress ? normalizeProgress(raw.progress) : normalized.progress,
+    tasks: normalized.tasks.map((task) => {
+      const summary = taskSummaryMap.get(task.id);
+      if (!summary) return task;
+      return {
+        ...task,
+        attemptsCount: summary.attemptsCount,
+        selectedAttemptNo: summary.selectedAttemptNo,
+        selectedScore: summary.selectedScore,
+        latestStatus: summary.latestStatus,
+      };
+    }),
+  };
+};
 
 const parseRoadmap = (raw: unknown): ParsedRoadmap => {
   // The backend GET /offerings/{id}/roadmap returns a flat array — handle both shapes:
@@ -433,14 +647,8 @@ const parseRoadmap = (raw: unknown): ParsedRoadmap => {
     : parseRows<any>(source?.items || source?.roadmap_items, ['items', 'roadmap_items']);
 
   const items = rawItems
-    .map(normalizeRoadmapItem)
-    .sort((left, right) => {
-      // Sort by week_no first (curriculum sequence), then order_index, then title
-      const leftKey = left.weekNo ?? left.orderIndex ?? Number.MAX_SAFE_INTEGER;
-      const rightKey = right.weekNo ?? right.orderIndex ?? Number.MAX_SAFE_INTEGER;
-      if (leftKey !== rightKey) return leftKey - rightKey;
-      return left.title.localeCompare(right.title);
-    });
+    .map(normalizeRoadmapEntry)
+    .sort(compareRoadmapItems);
 
   const progressRows = parseRows<any>(source?.progress || source?.roadmap_progress, ['progress', 'roadmap_progress'])
     .map((row) => ({
@@ -504,6 +712,43 @@ const summarizeStudent = (roadmap: ParsedRoadmap): Pick<StudentSummaryRow, 'prog
   };
 };
 
+const getTaskAttemptCount = (task: TaskRow): number => task.attemptsCount ?? task.results.length;
+
+const getTaskLatestStatus = (task: TaskRow): string | null => {
+  if (task.latestStatus) return task.latestStatus;
+  return task.results[task.results.length - 1]?.status || null;
+};
+
+const getTaskDisplayScore = (task: TaskRow): number | null => {
+  if (task.selectedScore !== null && task.selectedScore !== undefined) return task.selectedScore;
+  const latestResult = task.results[task.results.length - 1];
+  return latestResult?.score ?? null;
+};
+
+const getBestRoadmapItem = (roadmap: ParsedRoadmap): { title: string; score: number | null } | null => {
+  let best: { title: string; score: number | null } | null = null;
+
+  for (const item of roadmap.items) {
+    const candidates = [
+      item.progress?.bestScore,
+      item.progress?.avgScore,
+      ...item.tasks.map((task) => task.selectedScore),
+    ].filter((value): value is number => value !== null && value !== undefined);
+
+    if (candidates.length === 0) continue;
+
+    const score = Math.max(...candidates);
+    if (!best || score > (best.score ?? Number.NEGATIVE_INFINITY)) {
+      best = {
+        title: item.title,
+        score,
+      };
+    }
+  }
+
+  return best;
+};
+
 export default function LecturerWorkspacePage() {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
@@ -537,20 +782,21 @@ export default function LecturerWorkspacePage() {
   const [newOfferingYear, setNewOfferingYear] = useState(String(new Date().getFullYear()));
   const [newOfferingSection, setNewOfferingSection] = useState('');
   const [newOfferingCohort, setNewOfferingCohort] = useState('');
+  const [offeringFormIsActive, setOfferingFormIsActive] = useState(true);
   const [autoGenerateEnrollmentKey, setAutoGenerateEnrollmentKey] = useState(true);
   const [customEnrollmentKey, setCustomEnrollmentKey] = useState('');
+  const [editingOfferingId, setEditingOfferingId] = useState<string | null>(null);
+  const [pendingOfferingDeleteId, setPendingOfferingDeleteId] = useState<string | null>(null);
+  const [offeringDeleteBusy, setOfferingDeleteBusy] = useState(false);
 
   const [roadmapFilter, setRoadmapFilter] = useState<'all' | 'draft' | 'approved_active'>('all');
 
   // ── Spec editor mode ──────────────────────────────────────────────────────
   type SpecEditorMode = 'visual' | 'json';
   const [specEditorMode, setSpecEditorMode] = useState<SpecEditorMode>('visual');
-  const [visualSpec, setVisualSpec] = useState<VisualSpecState>({
-    header: { course_name: '', course_code: '', level: '', credit_units: '', prerequisites: '', description: '', rationale: '', aim: '', lectures: '', practicals: '' },
-    learning_outcomes: [],
-    assessment_plan: [],
-  });
+  const [visualSpec, setVisualSpec] = useState<VisualSpecState>(createEmptyVisualSpec);
   const [specJsonError, setSpecJsonError] = useState<string | null>(null);
+  const [roadmapEditRequested, setRoadmapEditRequested] = useState(false);
 
   // ── Node canvas state ─────────────────────────────────────────────────────
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -559,6 +805,8 @@ export default function LecturerWorkspacePage() {
   const [pendingReorder, setPendingReorder] = useState(false);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [pendingNodeActionId, setPendingNodeActionId] = useState<string | null>(null);
+  const [nodeActionBusy, setNodeActionBusy] = useState(false);
   const [roadmapLoading, setRoadmapLoading] = useState(false);
   const [roadmapError, setRoadmapError] = useState<string | null>(null);
   const [roadmapNotice, setRoadmapNotice] = useState<string | null>(null);
@@ -573,25 +821,7 @@ export default function LecturerWorkspacePage() {
     if (!specEditor.trim()) return;
     try {
       const parsed = JSON.parse(specEditor);
-      const h = parsed?.course_header || {};
-      setVisualSpec({
-        header: {
-          course_name: h.course_name || '',
-          course_code: h.course_code || '',
-          level: h.level || '',
-          credit_units: h.credit_units != null ? String(h.credit_units) : '',
-          prerequisites: Array.isArray(h.prerequisites)
-            ? h.prerequisites.join(', ')
-            : (h.prerequisites || ''),
-          description: h.description || '',
-          rationale: h.rationale || '',
-          aim: h.aim || '',
-          lectures: h.contact_hours?.lectures != null ? String(h.contact_hours.lectures) : '',
-          practicals: h.contact_hours?.practicals != null ? String(h.contact_hours.practicals) : '',
-        },
-        learning_outcomes: Array.isArray(parsed?.learning_outcomes) ? parsed.learning_outcomes : [],
-        assessment_plan: Array.isArray(parsed?.assessment_plan) ? parsed.assessment_plan : [],
-      });
+      setVisualSpec(buildVisualSpecState(parsed));
       setSpecJsonError(null);
     } catch {
       // Invalid JSON — don't wipe visual spec, just show the error on JSON tab
@@ -599,11 +829,6 @@ export default function LecturerWorkspacePage() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [specEditor]);
-
-  const [newItemTitle, setNewItemTitle] = useState('');
-  const [newItemDescription, setNewItemDescription] = useState('');
-  const [newItemWeekNo, setNewItemWeekNo] = useState('');
-  const [newItemEstimatedHours, setNewItemEstimatedHours] = useState('');
 
   const [taskDraftByItem, setTaskDraftByItem] = useState<Record<string, TaskDraft>>({});
   const [taskEditDraftByTask, setTaskEditDraftByTask] = useState<Record<string, TaskDraft>>({});
@@ -613,6 +838,7 @@ export default function LecturerWorkspacePage() {
   const [studentRows, setStudentRows] = useState<StudentSummaryRow[]>([]);
   const [selectedStudentEnrollmentId, setSelectedStudentEnrollmentId] = useState('');
   const [studentRoadmapByEnrollment, setStudentRoadmapByEnrollment] = useState<Record<string, ParsedRoadmap>>({});
+  const [collapsedStudentItemKeys, setCollapsedStudentItemKeys] = useState<Record<string, boolean>>({});
   const [assessmentStatusFilter, setAssessmentStatusFilter] = useState<'all' | 'submitted' | 'graded' | 'in_progress' | 'not_started'>('submitted');
   const [gradingByAttempt, setGradingByAttempt] = useState<Record<string, boolean>>({});
   const [gradeDraftByAttempt, setGradeDraftByAttempt] = useState<Record<string, GradeDraft>>({});
@@ -630,6 +856,70 @@ export default function LecturerWorkspacePage() {
     () => offerings.find((offering) => offering.id === selectedOfferingId) || null,
     [offerings, selectedOfferingId]
   );
+  const editingOffering = editingOfferingId
+    ? offerings.find((offering) => offering.id === editingOfferingId) || null
+    : null;
+  const pendingOfferingDelete = pendingOfferingDeleteId
+    ? offerings.find((offering) => offering.id === pendingOfferingDeleteId) || null
+    : null;
+  const pendingNodeAction = pendingNodeActionId
+    ? roadmapItems.find((item) => item.id === pendingNodeActionId) || null
+    : null;
+  const recentOfferings = offerings.slice(0, 4);
+  const uploadContextReady = Boolean(selectedOffering?.courseCode);
+  const recentUploadsForContext = recentUploads.filter(
+    (upload) => !selectedOfferingId || !upload.offeringId || upload.offeringId === selectedOfferingId
+  );
+
+  const showCourseSelector = ROADMAP_CONTEXT_TABS.includes(activeTab);
+  const isSpecApproved = specStatus === 'approved_active';
+  const hasRoadmapNodes = roadmapItems.length > 0;
+  const hasActiveRoadmap = roadmapItems.some((item) => item.status === 'approved_active');
+  const isRoadmapEditMode = !hasActiveRoadmap || roadmapEditRequested;
+  const isRoadmapViewMode = hasActiveRoadmap && !roadmapEditRequested;
+  const roadmapPrimaryActionLabel = hasActiveRoadmap && !isRoadmapEditMode ? 'Edit Roadmap' : 'Add Node';
+  const specViewMode: 'blank' | 'edit' | 'readonly' =
+    !specId && !specEditor.trim()
+      ? 'blank'
+      : specStatus === 'approved_active'
+        ? 'readonly'
+        : 'edit';
+
+  const resetSpecEditorState = () => {
+    setSpecId(null);
+    setSpecStatus(null);
+    setSpecSourceFile(null);
+    setSpecEditorMode('visual');
+    setSpecEditor('');
+    setSpecJsonError(null);
+    setVisualSpec(createEmptyVisualSpec());
+  };
+
+  const syncVisualToJson = (nextSpec: VisualSpecState) => {
+    setVisualSpec(nextSpec);
+    setSpecEditor((current) => buildSpecJsonText(nextSpec, current));
+    setSpecJsonError(null);
+  };
+
+  const updateSpecEditorMode = (mode: SpecEditorMode) => {
+    if (mode === 'json' && specEditorMode === 'visual') {
+      setSpecEditor(buildSpecJsonText(visualSpec, specEditor));
+      setSpecJsonError(null);
+    }
+
+    if (mode === 'visual' && specEditorMode === 'json') {
+      try {
+        const parsed = specEditor.trim() ? JSON.parse(specEditor) : {};
+        setVisualSpec(buildVisualSpecState(parsed));
+        setSpecJsonError(null);
+      } catch {
+        setSpecJsonError('Invalid JSON — fix in JSON Editor before returning to Visual Editor');
+        return;
+      }
+    }
+
+    setSpecEditorMode(mode);
+  };
 
   const selectedStudentRoadmap = selectedStudentEnrollmentId
     ? studentRoadmapByEnrollment[selectedStudentEnrollmentId] || null
@@ -644,6 +934,11 @@ export default function LecturerWorkspacePage() {
     for (const roadmap of Object.values(studentRoadmapByEnrollment)) {
       for (const item of roadmap.items || []) {
         for (const task of item.tasks || []) {
+          const latestStatus = (getTaskLatestStatus(task) || '').toLowerCase();
+          if (latestStatus === 'submitted') {
+            count += 1;
+            continue;
+          }
           for (const attempt of task.results || []) {
             if ((attempt.status || '').toLowerCase() === 'submitted') {
               count += 1;
@@ -666,6 +961,33 @@ export default function LecturerWorkspacePage() {
       }),
     [pendingAssessmentCount]
   );
+
+  useEffect(() => {
+    setSelectedItemId(null);
+    setDragId(null);
+    setDropId(null);
+    setPendingReorder(false);
+    setRoadmapEditRequested(false);
+    setPendingNodeActionId(null);
+    setNodeActionBusy(false);
+    setConfirmError(null);
+    setRoadmapItems([]);
+    setRoadmapError(null);
+    setRoadmapNotice(null);
+    setTaskDraftByItem({});
+    setTaskEditDraftByTask({});
+    resetSpecEditorState();
+    setSelectedStudentEnrollmentId('');
+    setStudentRows([]);
+    setStudentRoadmapByEnrollment({});
+    setCollapsedStudentItemKeys({});
+    setUploadFile(null);
+    setUploadError(null);
+    setUploadMessage(null);
+    setUploadHistory([]);
+    setUploadHistoryError(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOfferingId]);
 
   const isLecturerSurface = user?.role === 'lecturer' || user?.role === 'admin';
 
@@ -875,7 +1197,34 @@ export default function LecturerWorkspacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, isLecturerSurface]);
 
-  const createOffering = async () => {
+  const resetOfferingForm = () => {
+    setEditingOfferingId(null);
+    setNewOfferingCourseCode(courses[0]?.code || '');
+    setNewOfferingTerm('');
+    setNewOfferingYear(String(new Date().getFullYear()));
+    setNewOfferingSection('');
+    setNewOfferingCohort('');
+    setOfferingFormIsActive(true);
+    setAutoGenerateEnrollmentKey(true);
+    setCustomEnrollmentKey('');
+  };
+
+  const startOfferingEdit = (offering: OfferingRecord) => {
+    setEditingOfferingId(offering.id);
+    setSelectedOfferingId(offering.id);
+    setNewOfferingCourseCode(offering.courseCode);
+    setNewOfferingTerm(offering.term);
+    setNewOfferingYear(offering.year != null ? String(offering.year) : '');
+    setNewOfferingSection(offering.section || '');
+    setNewOfferingCohort(offering.cohort || '');
+    setOfferingFormIsActive(offering.isActive);
+    setAutoGenerateEnrollmentKey(Boolean(offering.enrollmentKeyGenerated && offering.enrollmentKey));
+    setCustomEnrollmentKey(offering.enrollmentKeyGenerated ? '' : offering.enrollmentKey || '');
+    setCreateError(null);
+    setCreateSuccess(null);
+  };
+
+  const saveOffering = async () => {
     if (!token || !newOfferingCourseCode.trim() || !newOfferingTerm.trim()) {
       setCreateError('Course and term are required.');
       return;
@@ -890,33 +1239,77 @@ export default function LecturerWorkspacePage() {
         course_code: newOfferingCourseCode.trim(),
         term: newOfferingTerm.trim(),
         auto_generate_enrollment_key: autoGenerateEnrollmentKey,
-        is_active: true,
+        is_active: offeringFormIsActive,
       };
 
       const yearValue = asNumber(newOfferingYear);
-      if (yearValue !== null) payload.year = yearValue;
-      if (newOfferingSection.trim()) payload.section = newOfferingSection.trim();
-      if (newOfferingCohort.trim()) payload.cohort = newOfferingCohort.trim();
-      if (!autoGenerateEnrollmentKey && customEnrollmentKey.trim()) payload.enrollment_key = customEnrollmentKey.trim();
+      payload.year = yearValue;
+      payload.section = newOfferingSection.trim() || null;
+      payload.cohort = newOfferingCohort.trim() || null;
+      if (
+        autoGenerateEnrollmentKey
+        && editingOffering
+        && editingOffering.enrollmentKeyGenerated
+        && editingOffering.enrollmentKey
+        && editingOffering.courseCode === newOfferingCourseCode.trim()
+      ) {
+        payload.enrollment_key = editingOffering.enrollmentKey;
+      } else if (!autoGenerateEnrollmentKey && customEnrollmentKey.trim()) {
+        payload.enrollment_key = customEnrollmentKey.trim();
+      }
 
-      await offeringApi.create(token, payload as any);
-      setCreateSuccess('Offering created successfully.');
+      if (editingOfferingId) {
+        await offeringApi.update(token, editingOfferingId, payload as any);
+        setCreateSuccess('Offering updated successfully.');
+      } else {
+        await offeringApi.create(token, payload as any);
+        setCreateSuccess('Offering created successfully.');
+      }
       setActiveTab('offerings');
 
       await refreshOfferings(false);
-      setNewOfferingSection('');
-      setNewOfferingCohort('');
-      setCustomEnrollmentKey('');
+      resetOfferingForm();
     } catch (requestError: any) {
-      setCreateError(requestError?.message || 'Failed to create offering.');
+      setCreateError(requestError?.message || `Failed to ${editingOfferingId ? 'update' : 'create'} offering.`);
     } finally {
       setCreateBusy(false);
+    }
+  };
+
+  const closeOfferingDeleteConfirm = () => {
+    if (offeringDeleteBusy) return;
+    setPendingOfferingDeleteId(null);
+  };
+
+  const confirmDeleteOffering = async () => {
+    if (!token || !pendingOfferingDeleteId) return;
+
+    setOfferingDeleteBusy(true);
+    setCreateError(null);
+    setCreateSuccess(null);
+
+    try {
+      await offeringApi.delete(token, pendingOfferingDeleteId);
+      if (selectedOfferingId === pendingOfferingDeleteId) {
+        setSelectedOfferingId('');
+      }
+      if (editingOfferingId === pendingOfferingDeleteId) {
+        resetOfferingForm();
+      }
+      setPendingOfferingDeleteId(null);
+      setCreateSuccess('Offering deleted successfully.');
+      await refreshOfferings(false);
+    } catch (requestError: any) {
+      setCreateError(requestError?.message || 'Failed to delete offering.');
+    } finally {
+      setOfferingDeleteBusy(false);
     }
   };
 
   const loadRoadmap = async (filterOverride?: 'all' | 'draft' | 'approved_active') => {
     if (!token || !selectedOfferingId) {
       setRoadmapItems([]);
+      resetSpecEditorState();
       return;
     }
 
@@ -940,12 +1333,16 @@ export default function LecturerWorkspacePage() {
         setSpecStatus(currentSpec.status || null);
         if (currentSpec.spec_json) {
           setSpecEditor(JSON.stringify(currentSpec.spec_json, null, 2));
+        } else {
+          resetSpecEditorState();
         }
       } else {
-        setSpecId(parsed.specId || null);
-        setSpecStatus(parsed.specStatus || null);
-        if (parsed.specJson) {
-          setSpecEditor(JSON.stringify(parsed.specJson, null, 2));
+        if (parsed.specId || parsed.specJson) {
+          setSpecId(parsed.specId || null);
+          setSpecStatus(parsed.specStatus || null);
+          setSpecEditor(parsed.specJson ? JSON.stringify(parsed.specJson, null, 2) : '');
+        } else {
+          resetSpecEditorState();
         }
       }
     } catch (requestError: any) {
@@ -1034,6 +1431,36 @@ export default function LecturerWorkspacePage() {
     }
   };
 
+  const editApprovedSpec = async () => {
+    if (!token || !specId) return;
+
+    setRoadmapLoading(true);
+    setRoadmapError(null);
+
+    try {
+      await roadmapAdminApi.submitSpecReview(token, specId);
+
+      const activeItemIds = roadmapItems
+        .filter((item) => item.status === 'approved_active')
+        .map((item) => item.id);
+
+      await Promise.all(
+        activeItemIds.map((itemId) =>
+          roadmapAdminApi.updateRoadmapItem(token, itemId, { status: 'draft' })
+        )
+      );
+
+      setSpecEditorMode('visual');
+      setRoadmapNotice('Spec unlocked for editing. Active roadmap items moved back to draft.');
+      await loadRoadmap();
+      await refreshOfferings(false);
+    } catch (requestError: any) {
+      setRoadmapError(requestError?.message || 'Failed to reopen the approved spec for editing.');
+    } finally {
+      setRoadmapLoading(false);
+    }
+  };
+
   const generateRoadmap = async () => {
     if (!token || !selectedOfferingId) return;
 
@@ -1050,13 +1477,54 @@ export default function LecturerWorkspacePage() {
     }
   };
 
+  const confirmStructure = async (): Promise<boolean> => {
+    if (!token) return false;
+
+    setConfirmBusy(true);
+    setConfirmError(null);
+
+    try {
+      await Promise.all(
+        roadmapItems.map((item, idx) =>
+          roadmapAdminApi.updateRoadmapItem(token, item.id, {
+            title: item.title,
+            description: item.description || null,
+            week_no: item.weekNo,
+            estimated_hours: item.estimatedHours,
+            sequence_no: idx + 1,
+          })
+        )
+      );
+      setPendingReorder(false);
+      return true;
+    } catch (e: any) {
+      setConfirmError(e?.message || 'Failed to confirm structure.');
+      return false;
+    } finally {
+      setConfirmBusy(false);
+    }
+  };
+
   const activateRoadmap = async () => {
     if (!token || !selectedOfferingId) return;
 
+    if (pendingReorder) {
+      const confirmed = await confirmStructure();
+      if (!confirmed) return;
+    }
+
     setRoadmapLoading(true);
     try {
-      await roadmapAdminApi.activateRoadmap(token, selectedOfferingId);
-      setRoadmapNotice('Roadmap activated.');
+      const hasDraftRoadmap = roadmapItems.some((item) => item.status === 'draft');
+
+      if (hasDraftRoadmap || !hasActiveRoadmap) {
+        await roadmapAdminApi.activateRoadmap(token, selectedOfferingId);
+        setRoadmapNotice('Roadmap activated.');
+      } else {
+        setRoadmapNotice('Roadmap changes finalized and editor locked.');
+      }
+
+      setRoadmapEditRequested(false);
       await loadRoadmap();
       await refreshOfferings(false);
     } catch (requestError: any) {
@@ -1066,27 +1534,41 @@ export default function LecturerWorkspacePage() {
     }
   };
 
-  const createRoadmapItem = async () => {
-    if (!token || !selectedOfferingId || !newItemTitle.trim()) return;
+  const enableRoadmapEditMode = () => {
+    setRoadmapEditRequested(true);
+    setRoadmapNotice('Roadmap edit mode enabled.');
+  };
+
+  const createRoadmapNode = async () => {
+    if (!token || !selectedOfferingId) return;
+
+    const nextSequenceNo = roadmapItems.reduce((max, item) => {
+      return Math.max(max, item.orderIndex ?? 0);
+    }, 0) + 1;
+    const nextWeekNo = roadmapItems.reduce((max, item) => {
+      return Math.max(max, item.weekNo ?? 0);
+    }, 0) + 1;
 
     setRoadmapLoading(true);
+    setRoadmapError(null);
+
     try {
-      await roadmapAdminApi.createRoadmapItem(token, selectedOfferingId, {
-        title: newItemTitle.trim(),
-        description: newItemDescription.trim() || undefined,
-        week_no: asNumber(newItemWeekNo),
-        estimated_hours: asNumber(newItemEstimatedHours),
+      const created = await roadmapAdminApi.createRoadmapItem(token, selectedOfferingId, {
+        sequence_no: nextSequenceNo,
+        week_no: nextWeekNo,
+        title: `Week ${nextWeekNo}`,
+        estimated_hours: null,
+        status: hasActiveRoadmap ? 'approved_active' : 'draft',
       });
 
-      setNewItemTitle('');
-      setNewItemDescription('');
-      setNewItemWeekNo('');
-      setNewItemEstimatedHours('');
-
-      setRoadmapNotice('Roadmap item created.');
+      const createdId = created?.id?.toString?.() || null;
+      setRoadmapNotice('Roadmap node created.');
       await loadRoadmap();
+      if (createdId) {
+        setSelectedItemId(createdId);
+      }
     } catch (requestError: any) {
-      setRoadmapError(requestError?.message || 'Failed to create roadmap item.');
+      setRoadmapError(requestError?.message || 'Failed to create roadmap node.');
     } finally {
       setRoadmapLoading(false);
     }
@@ -1109,12 +1591,62 @@ export default function LecturerWorkspacePage() {
     setRoadmapLoading(true);
     try {
       await roadmapAdminApi.archiveRoadmapItem(token, itemId);
-      setRoadmapNotice('Roadmap item archived.');
+      setRoadmapNotice('Roadmap node removed.');
       await loadRoadmap();
     } catch (requestError: any) {
       setRoadmapError(requestError?.message || 'Failed to archive roadmap item.');
     } finally {
       setRoadmapLoading(false);
+    }
+  };
+
+  const deleteRoadmapItem = async (itemId: string) => {
+    if (!token) return;
+
+    setRoadmapLoading(true);
+    try {
+      await roadmapAdminApi.deleteRoadmapItem(token, itemId);
+      setRoadmapNotice('Roadmap node permanently deleted.');
+      await loadRoadmap();
+    } catch (requestError: any) {
+      setRoadmapError(requestError?.message || 'Failed to delete roadmap item.');
+    } finally {
+      setRoadmapLoading(false);
+    }
+  };
+
+  const openNodeDeleteConfirm = (itemId: string) => {
+    setPendingNodeActionId(itemId);
+  };
+
+  const closeNodeDeleteConfirm = () => {
+    if (nodeActionBusy) return;
+    setPendingNodeActionId(null);
+  };
+
+  const confirmArchiveRoadmapNode = async () => {
+    if (!pendingNodeActionId) return;
+
+    setNodeActionBusy(true);
+    try {
+      await archiveRoadmapItem(pendingNodeActionId);
+      setSelectedItemId((prev) => (prev === pendingNodeActionId ? null : prev));
+      setPendingNodeActionId(null);
+    } finally {
+      setNodeActionBusy(false);
+    }
+  };
+
+  const confirmDeleteRoadmapNode = async () => {
+    if (!pendingNodeActionId) return;
+
+    setNodeActionBusy(true);
+    try {
+      await deleteRoadmapItem(pendingNodeActionId);
+      setSelectedItemId((prev) => (prev === pendingNodeActionId ? null : prev));
+      setPendingNodeActionId(null);
+    } finally {
+      setNodeActionBusy(false);
     }
   };
 
@@ -1313,24 +1845,31 @@ export default function LecturerWorkspacePage() {
             roadmapMap[row.id] = parsed;
 
             const summary = summarizeStudent(parsed);
+            const bestItem = getBestRoadmapItem(parsed);
             return {
               enrollmentId: row.id,
               fullName: row.fullName,
               email: row.email,
+              status: row.status,
               progressPercent: summary.progressPercent,
               avgScore: summary.avgScore,
               itemsCompleted: summary.itemsCompleted,
               totalItems: summary.totalItems,
+              bestItemTitle: bestItem?.title || null,
+              bestItemScore: bestItem?.score ?? null,
             } satisfies StudentSummaryRow;
           } catch {
             return {
               enrollmentId: row.id,
               fullName: row.fullName,
               email: row.email,
+              status: row.status,
               progressPercent: 0,
               avgScore: null,
               itemsCompleted: 0,
               totalItems: 0,
+              bestItemTitle: null,
+              bestItemScore: null,
             } satisfies StudentSummaryRow;
           }
         })
@@ -1347,6 +1886,14 @@ export default function LecturerWorkspacePage() {
     } finally {
       setStudentsLoading(false);
     }
+  };
+
+  const toggleStudentRoadmapCard = (enrollmentId: string, itemId: string) => {
+    const key = `${enrollmentId}:${itemId}`;
+    setCollapsedStudentItemKeys((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
   };
 
   useEffect(() => {
@@ -1430,12 +1977,17 @@ export default function LecturerWorkspacePage() {
 
   const loadUploadHistory = async () => {
     if (!token || !isLecturerSurface) return;
+    if (!selectedOffering?.courseCode) {
+      setUploadHistory([]);
+      setUploadHistoryError(null);
+      return;
+    }
 
     setUploadHistoryLoading(true);
     setUploadHistoryError(null);
 
     try {
-      const response = await lecturerApi.getUploads(token, selectedOffering?.courseCode || undefined);
+      const response = await lecturerApi.getUploads(token, selectedOffering.courseCode);
       const rows = parseRows<any>(response, ['items', 'results', 'uploads']);
       setUploadHistory(rows);
     } catch (requestError: any) {
@@ -1448,19 +2000,29 @@ export default function LecturerWorkspacePage() {
 
   useEffect(() => {
     if (activeTab !== 'uploads') return;
+    if (!selectedOffering?.courseCode) {
+      setUploadHistory([]);
+      setUploadHistoryError(null);
+      return;
+    }
     loadUploadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, selectedOfferingId]);
 
   const uploadDocument = async () => {
-    if (!token || !uploadFile) return;
+    if (!token || !uploadFile || !selectedOffering?.courseCode) {
+      if (!selectedOffering?.courseCode) {
+        setUploadError('Select a course to upload materials');
+      }
+      return;
+    }
 
     setUploading(true);
     setUploadError(null);
     setUploadMessage(null);
 
     try {
-      const response = await ingestionApi.uploadDocument(token, uploadFile);
+      const response = await ingestionApi.uploadDocument(token, uploadFile, selectedOffering.courseCode);
       const id = response?.document_id || response?.id || uploadFile.name;
 
       setUploadMessage(`Uploaded ${uploadFile.name} (${id}).`);
@@ -1537,54 +2099,42 @@ export default function LecturerWorkspacePage() {
       </header>
 
       <main className="mx-auto w-full max-w-7xl space-y-4 px-4 py-6 sm:px-6 lg:px-8">
-        <InlineErrorBanner message={activeTab === 'offerings' ? offeringsError : null} />
+        <InlineErrorBanner message={activeTab === 'offerings' || showCourseSelector ? offeringsError : null} />
         <InlineErrorBanner message={activeTab === 'offerings' ? coursesError : null} />
 
-        <WorkspaceTabs tabs={tabsForRender} activeTab={activeTab} onChange={(tab) => setActiveTab(tab as LecturerTab)} />
-
-        <SectionCard
-          title="Offering Context"
-          description="Workspace operations apply to your selected offering."
-          actions={
-            <button
-              type="button"
-              onClick={() => refreshOfferings(true)}
-              disabled={offeringsLoading}
-              className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-            >
-              {offeringsLoading ? 'Refreshing...' : 'Refresh'}
-            </button>
+        <WorkspaceTabs
+          tabs={tabsForRender}
+          activeTab={activeTab}
+          onChange={(tab) => setActiveTab(tab as LecturerTab)}
+          rightSlot={
+            showCourseSelector ? (
+              <div className="flex flex-col gap-1 xl:items-end">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-500">
+                  Course Context
+                </span>
+                <select
+                  value={selectedOfferingId}
+                  onChange={(event) => setSelectedOfferingId(event.target.value)}
+                  disabled={offeringsLoading || offerings.length === 0}
+                  className="min-w-[min(100%,360px)] rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 focus:border-blue-500 focus:outline-none disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400"
+                >
+                  <option value="">
+                    {offeringsLoading
+                      ? 'Loading offerings...'
+                      : offerings.length === 0
+                        ? 'No offerings available'
+                        : 'Select offering'}
+                  </option>
+                  {offerings.map((offering) => (
+                    <option key={offering.id} value={offering.id}>
+                      {offering.courseCode} • {offering.term} {offering.year || ''} {offering.section ? `• ${offering.section}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null
           }
-        >
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(240px,420px)_1fr]">
-            <select
-              value={selectedOfferingId}
-              onChange={(event) => setSelectedOfferingId(event.target.value)}
-              className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">Select offering</option>
-              {offerings.map((offering) => (
-                <option key={offering.id} value={offering.id}>
-                  {offering.courseCode} • {offering.term} {offering.year || ''} {offering.section ? `• ${offering.section}` : ''}
-                </option>
-              ))}
-            </select>
-
-            {selectedOffering ? (
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-2 text-sm text-gray-700">
-                <span className="font-semibold text-gray-900">{selectedOffering.courseCode}</span>
-                <span className="text-gray-500"> • {selectedOffering.courseName}</span>
-                <span className="text-gray-500"> • {selectedOffering.term} {selectedOffering.year || ''}</span>
-              </div>
-            ) : (
-              <div className="rounded-2xl border border-dashed border-gray-300 px-4 py-2 text-sm text-gray-500">
-                {offerings.length === 0
-                  ? 'No course offerings available. Create one in the Offerings tab.'
-                  : 'Select an offering to unlock roadmap, student, upload, and AI context.'}
-              </div>
-            )}
-          </div>
-        </SectionCard>
+        />
 
         {activeTab === 'dashboard' && (
           <div className="space-y-4">
@@ -1632,9 +2182,43 @@ export default function LecturerWorkspacePage() {
                   onClick={() => goToTab('uploads')}
                   className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-left text-sm font-semibold text-blue-700 hover:bg-blue-100"
                 >
-                  Upload Course Spec
+                  Upload Course Material
                 </button>
               </div>
+            </SectionCard>
+
+            <SectionCard title="Recent Activity" description="A snapshot of the latest offerings in your workspace.">
+              {recentOfferings.length === 0 ? (
+                <p className="text-sm text-gray-500">No offerings available yet. Create your first offering to get started.</p>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  {recentOfferings.map((offering) => (
+                    <div
+                      key={`dashboard-${offering.id}`}
+                      className={`rounded-2xl border px-4 py-3 transition ${
+                        selectedOfferingId === offering.id
+                          ? 'border-blue-200 bg-blue-50'
+                          : 'border-gray-200 bg-white'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">{offering.courseCode}</p>
+                          <p className="text-xs text-gray-500">
+                            {offering.term} {offering.year || ''} {offering.section ? `• Section ${offering.section}` : ''}
+                          </p>
+                        </div>
+                        <StatusPill status={activeRoadmapByOffering[offering.id] ? 'approved_active' : 'draft'} />
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+                        <span>{enrollmentCountByOffering[offering.id] || 0} students</span>
+                        <span>{offering.isActive ? 'Active offering' : 'Inactive offering'}</span>
+                        <span>{formatDateLabel(offering.updatedAt || offering.createdAt)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </SectionCard>
           </div>
         )}
@@ -1649,17 +2233,28 @@ export default function LecturerWorkspacePage() {
             )}
 
             <SectionCard
-              title="Create Offering"
-              description="Lecturers create offerings from existing course records. Students enroll afterwards."
+              title={editingOffering ? 'Edit Offering' : 'Create Offering'}
+              description={editingOffering ? 'Update offering metadata without leaving the workspace.' : 'Lecturers create offerings from existing course records. Students enroll afterwards.'}
               actions={
-                <button
-                  type="button"
-                  onClick={refreshCourseCatalog}
-                  disabled={coursesLoading}
-                  className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                >
-                  {coursesLoading ? 'Loading Courses...' : 'Refresh Courses'}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  {editingOffering && (
+                    <button
+                      type="button"
+                      onClick={resetOfferingForm}
+                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={refreshCourseCatalog}
+                    disabled={coursesLoading}
+                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {coursesLoading ? 'Loading Courses...' : 'Refresh Courses'}
+                  </button>
+                </div>
               }
             >
               <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
@@ -1707,6 +2302,15 @@ export default function LecturerWorkspacePage() {
                 <label className="flex items-center gap-2 rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700">
                   <input
                     type="checkbox"
+                    checked={offeringFormIsActive}
+                    onChange={(event) => setOfferingFormIsActive(event.target.checked)}
+                  />
+                  Offering is active
+                </label>
+
+                <label className="flex items-center gap-2 rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
                     checked={autoGenerateEnrollmentKey}
                     onChange={(event) => setAutoGenerateEnrollmentKey(event.target.checked)}
                   />
@@ -1717,18 +2321,18 @@ export default function LecturerWorkspacePage() {
                   <input
                     value={customEnrollmentKey}
                     onChange={(event) => setCustomEnrollmentKey(event.target.value)}
-                    placeholder="Custom enrollment key"
+                    placeholder="Custom enrollment key (leave blank for open enrollment)"
                     className="rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
                   />
                 )}
 
                 <button
                   type="button"
-                  onClick={createOffering}
+                  onClick={saveOffering}
                   disabled={createBusy || !newOfferingCourseCode.trim() || !newOfferingTerm.trim()}
                   className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
                 >
-                  {createBusy ? 'Creating...' : 'Create Offering'}
+                  {createBusy ? (editingOffering ? 'Saving...' : 'Creating...') : (editingOffering ? 'Save Changes' : 'Create Offering')}
                 </button>
               </div>
             </SectionCard>
@@ -1741,10 +2345,17 @@ export default function LecturerWorkspacePage() {
               ) : (
                 <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                   {offerings.map((offering) => (
-                    <button
+                    <div
                       key={offering.id}
-                      type="button"
                       onClick={() => setSelectedOfferingId(offering.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setSelectedOfferingId(offering.id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
                       className={`rounded-3xl border p-4 text-left transition ${
                         selectedOfferingId === offering.id
                           ? 'border-blue-200 bg-blue-50'
@@ -1770,107 +2381,50 @@ export default function LecturerWorkspacePage() {
                       <div className="mt-1 text-xs text-gray-600">
                         Roadmap: {activeRoadmapByOffering[offering.id] ? 'Active' : 'Draft / none'}
                       </div>
-                    </button>
+                      <div className="mt-1 text-xs text-gray-500">
+                        Updated: {formatDateLabel(offering.updatedAt || offering.createdAt)}
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedOfferingId(offering.id);
+                          }}
+                          className="rounded-xl border border-gray-200 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                        >
+                          Use Course
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            startOfferingEdit(offering);
+                          }}
+                          className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setPendingOfferingDeleteId(offering.id);
+                          }}
+                          className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
                   ))}
                 </div>
               )}
             </SectionCard>
-
-            {selectedOffering && (
-              <SectionCard title="Offering Detail" description="Open this offering in other workspace modules.">
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => goToTab('roadmap')}
-                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                  >
-                    Open Roadmap Builder
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => goToTab('students')}
-                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                  >
-                    View Students
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => goToTab('uploads')}
-                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                  >
-                    Upload Documents
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => goToTab('assistant')}
-                    className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                  >
-                    Ask AI Assistant
-                  </button>
-                </div>
-              </SectionCard>
-            )}
           </div>
         )}
 
         {activeTab === 'roadmap' && (() => {
-          // ── helpers (inline, no new state needed) ────────────────────────────
-          const buildVisualSpec = (jsonStr: string): VisualSpecState => {
-            try {
-              const parsed = JSON.parse(jsonStr);
-              const h = parsed?.course_header || {};
-              return {
-                header: {
-                  course_name: h.course_name || '',
-                  course_code: h.course_code || '',
-                  level: h.level || '',
-                  credit_units: h.credit_units != null ? String(h.credit_units) : '',
-                  prerequisites: Array.isArray(h.prerequisites) ? h.prerequisites.join(', ') : (h.prerequisites || ''),
-                  description: h.description || '',
-                  rationale: h.rationale || '',
-                  aim: h.aim || '',
-                  lectures: h.contact_hours?.lectures != null ? String(h.contact_hours.lectures) : '',
-                  practicals: h.contact_hours?.practicals != null ? String(h.contact_hours.practicals) : '',
-                },
-                learning_outcomes: Array.isArray(parsed?.learning_outcomes) ? parsed.learning_outcomes : [],
-                assessment_plan: Array.isArray(parsed?.assessment_plan) ? parsed.assessment_plan : [],
-              };
-            } catch {
-              return visualSpec;
-            }
-          };
-
-          const syncVisualToJson = (vs: VisualSpecState) => {
-            try {
-              const current = specEditor ? JSON.parse(specEditor) : {};
-              const next = {
-                ...current,
-                course_header: {
-                  ...(current.course_header || {}),
-                  course_name: vs.header.course_name,
-                  course_code: vs.header.course_code,
-                  level: vs.header.level,
-                  credit_units: vs.header.credit_units ? Number(vs.header.credit_units) : null,
-                  prerequisites: vs.header.prerequisites.split(',').map((s: string) => s.trim()).filter(Boolean),
-                  description: vs.header.description,
-                  rationale: vs.header.rationale,
-                  aim: vs.header.aim,
-                  contact_hours: {
-                    lectures: vs.header.lectures ? Number(vs.header.lectures) : null,
-                    practicals: vs.header.practicals ? Number(vs.header.practicals) : null,
-                    total: (vs.header.lectures ? Number(vs.header.lectures) : 0) + (vs.header.practicals ? Number(vs.header.practicals) : 0) || null,
-                  },
-                },
-                learning_outcomes: vs.learning_outcomes,
-                assessment_plan: vs.assessment_plan,
-              };
-              setSpecEditor(JSON.stringify(next, null, 2));
-              setSpecJsonError(null);
-            } catch {
-              // keep existing JSON
-            }
-          };
-
           const handleReorder = (fromId: string, toId: string) => {
             if (fromId === toId) return;
             setRoadmapItems((prev) => {
@@ -1885,29 +2439,6 @@ export default function LecturerWorkspacePage() {
             setPendingReorder(true);
             setDragId(null);
             setDropId(null);
-          };
-
-          const confirmStructure = async () => {
-            setConfirmBusy(true);
-            setConfirmError(null);
-            try {
-              await Promise.allSettled(
-                roadmapItems.map((item, idx) =>
-                  updateRoadmapItem(item.id, {
-                    title: item.title,
-                    description: item.description || null,
-                    week_no: item.weekNo,
-                    estimated_hours: item.estimatedHours,
-                    sequence_no: idx + 1,
-                  })
-                )
-              );
-              setPendingReorder(false);
-            } catch (e: any) {
-              setConfirmError(e?.message || 'Failed to confirm structure.');
-            } finally {
-              setConfirmBusy(false);
-            }
           };
 
           // Build node data from roadmapItems — apply filter client-side (API always fetches all)
@@ -1926,6 +2457,8 @@ export default function LecturerWorkspacePage() {
           }));
 
           const selectedItem = roadmapItems.find((i) => i.id === selectedItemId) || null;
+          const activeAssessmentCount = selectedItem?.tasks.filter((task) => task.isActive).length ?? 0;
+          const inactiveAssessmentCount = selectedItem ? selectedItem.tasks.length - activeAssessmentCount : 0;
 
           return (
             <div className="flex gap-4">
@@ -1974,25 +2507,35 @@ export default function LecturerWorkspacePage() {
                       </div>
 
                       <div className="flex flex-wrap gap-2">
-                        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 transition">
+                        <label className={`inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm transition ${
+                          isSpecApproved
+                            ? 'cursor-not-allowed bg-slate-100 text-slate-400'
+                            : 'cursor-pointer text-slate-600 hover:bg-slate-50'
+                        }`}>
                           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-                          <input type="file" accept=".pdf,.docx" className="hidden" onChange={(e) => { setSpecSourceFile(e.target.files?.[0] || null); setRoadmapError(null); }} />
-                          {specSourceFile ? specSourceFile.name : 'Choose PDF / DOCX'}
+                          <input
+                            type="file"
+                            accept=".pdf,.docx"
+                            disabled={isSpecApproved}
+                            className="hidden"
+                            onChange={(e) => { setSpecSourceFile(e.target.files?.[0] || null); setRoadmapError(null); }}
+                          />
+                          {specSourceFile ? specSourceFile.name : isSpecApproved ? 'Spec Upload Locked' : 'Choose PDF / DOCX'}
                         </label>
 
-                        <button type="button" onClick={extractSpec} disabled={!specSourceFile || roadmapLoading}
+                        <button type="button" onClick={extractSpec} disabled={!specSourceFile || roadmapLoading || isSpecApproved}
                           className="flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition">
                           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
                           {roadmapLoading ? 'Extracting…' : 'Extract Spec'}
                         </button>
 
-                        <button type="button" onClick={generateRoadmap} disabled={roadmapLoading}
+                        <button type="button" onClick={generateRoadmap} disabled={roadmapLoading || hasRoadmapNodes}
                           className="flex items-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50 transition">
                           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
                           Generate Roadmap
                         </button>
 
-                        <button type="button" onClick={activateRoadmap} disabled={roadmapLoading}
+                        <button type="button" onClick={activateRoadmap} disabled={roadmapLoading || confirmBusy || (hasActiveRoadmap && isRoadmapViewMode)}
                           className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50 transition">
                           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
                           Activate Roadmap
@@ -2000,86 +2543,130 @@ export default function LecturerWorkspacePage() {
                       </div>
                     </div>
 
-                    {/* ── SPEC EDITOR (tabbed) ────────────────────────────── */}
+                    {/* ── SPEC VIEW / EDITOR ───────────────────────────────── */}
                     <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-                      {/* Tab header */}
-                      <div className="flex items-center justify-between border-b border-slate-100 px-4 pt-3">
-                        <div className="flex gap-0">
-                          {(['visual', 'json'] as const).map((mode) => (
-                            <button
-                              key={mode}
-                              type="button"
-                              onClick={() => {
-                                if (mode === 'json' && specEditorMode === 'visual') {
-                                  syncVisualToJson(visualSpec);
-                                }
-                                if (mode === 'visual' && specEditorMode === 'json') {
-                                  const parsed = buildVisualSpec(specEditor);
-                                  setVisualSpec(parsed);
-                                  try { JSON.parse(specEditor); setSpecJsonError(null); } catch { setSpecJsonError('Invalid JSON'); }
-                                }
-                                setSpecEditorMode(mode);
-                              }}
-                              className={`rounded-t-xl px-4 py-2 text-sm font-semibold transition border-b-2 ${
-                                specEditorMode === mode
-                                  ? 'border-blue-500 text-blue-700 bg-blue-50'
-                                  : 'border-transparent text-slate-500 hover:text-slate-700'
-                              }`}
-                            >
-                              {mode === 'visual' ? '✏️ Visual Editor' : '{ } JSON Editor'}
-                            </button>
-                          ))}
+                      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-800">
+                            {specViewMode === 'readonly' ? 'Approved Spec' : 'Spec Editor'}
+                          </h3>
+                          <p className="text-xs text-slate-500">
+                            {specViewMode === 'blank'
+                              ? 'No spec exists for this offering yet.'
+                              : specViewMode === 'readonly'
+                                ? 'Approved specs are locked until you reopen them for lecturer review.'
+                                : 'Switch between the visual editor and JSON editor as needed.'}
+                          </p>
                         </div>
-                        <div className="flex items-center gap-2 pb-2">
-                          <button type="button" onClick={saveSpecEdits} disabled={!specId || roadmapLoading}
-                            className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition">
-                            💾 Save Spec
-                          </button>
-                          <button type="button" onClick={approveSpec} disabled={!specId || roadmapLoading || specStatus === 'approved_active'}
-                            className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 transition">
-                            ✅ Approve Spec
-                          </button>
+
+                        {specViewMode === 'edit' && (
+                          <div className="flex items-center gap-2">
+                            {(['visual', 'json'] as const).map((mode) => (
+                              <button
+                                key={mode}
+                                type="button"
+                                onClick={() => updateSpecEditorMode(mode)}
+                                className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition ${
+                                  specEditorMode === mode
+                                    ? 'bg-blue-50 text-blue-700'
+                                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
+                                }`}
+                              >
+                                {mode === 'visual' ? 'Visual Editor' : 'JSON Editor'}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-2">
+                          {specViewMode === 'readonly' && (
+                            <button
+                              type="button"
+                              onClick={editApprovedSpec}
+                              disabled={roadmapLoading}
+                              className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                            >
+                              Edit
+                            </button>
+                          )}
+
+                          {specViewMode === 'edit' && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={saveSpecEdits}
+                                disabled={!specId || roadmapLoading}
+                                className="rounded-xl border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition"
+                              >
+                                Save Spec
+                              </button>
+                              <button
+                                type="button"
+                                onClick={approveSpec}
+                                disabled={!specId || roadmapLoading || specStatus === 'approved_active'}
+                                className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 transition"
+                              >
+                                Approve Spec
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
 
-                      {/* Tab body */}
                       <div className="p-4">
-                        {!specId && !specEditor && (
-                          <p className="text-sm text-slate-400 italic">No spec loaded yet. Upload a document and click "Extract Spec" to get started.</p>
+                        {specViewMode === 'blank' && (
+                          <p className="text-sm text-slate-400 italic">
+                            No spec loaded yet. Upload a document and click "Extract Spec" to get started.
+                          </p>
                         )}
 
-                        {specEditorMode === 'visual' && (specId || specEditor) && (
+                        {specViewMode === 'readonly' && (
+                          <SpecReadonlyView spec={visualSpec} jsonText={specEditor} />
+                        )}
+
+                        {specViewMode === 'edit' && specEditorMode === 'visual' && (
                           <SpecVisualEditor
                             spec={visualSpec}
-                            onChange={(next) => {
-                              setVisualSpec(next);
-                              syncVisualToJson(next);
-                            }}
+                            onChange={(next) => syncVisualToJson(next)}
                           />
                         )}
 
-                        {specEditorMode === 'json' && (
+                        {specViewMode === 'edit' && specEditorMode === 'json' && (
                           <>
                             {specJsonError && (
                               <p className="mb-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">
-                                ⚠ {specJsonError}
+                                Warning: {specJsonError}
                               </p>
                             )}
                             <textarea
                               value={specEditor}
                               onChange={(e) => {
                                 setSpecEditor(e.target.value);
-                                try { JSON.parse(e.target.value); setSpecJsonError(null); } catch { setSpecJsonError('Invalid JSON — fix before saving'); }
+                                try {
+                                  JSON.parse(e.target.value);
+                                  setSpecJsonError(null);
+                                } catch {
+                                  setSpecJsonError('Invalid JSON — fix before saving');
+                                }
                               }}
                               rows={16}
-                              placeholder="Spec JSON appears here after extraction…"
+                              placeholder="Spec JSON appears here after extraction..."
                               className={`w-full rounded-xl border bg-slate-50 px-3 py-3 font-mono text-xs text-slate-800 focus:outline-none focus:ring-1 transition ${
                                 specJsonError ? 'border-red-400 focus:ring-red-400' : 'border-slate-200 focus:border-blue-400 focus:ring-blue-400'
                               }`}
                             />
-                            <button type="button"
-                              onClick={() => { try { setSpecEditor(JSON.stringify(JSON.parse(specEditor), null, 2)); setSpecJsonError(null); } catch { setSpecJsonError('Cannot format — invalid JSON'); } }}
-                              className="mt-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                try {
+                                  setSpecEditor(JSON.stringify(JSON.parse(specEditor), null, 2));
+                                  setSpecJsonError(null);
+                                } catch {
+                                  setSpecJsonError('Cannot format — invalid JSON');
+                                }
+                              }}
+                              className="mt-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
+                            >
                               Format JSON
                             </button>
                           </>
@@ -2093,10 +2680,22 @@ export default function LecturerWorkspacePage() {
                         <div>
                           <h3 className="text-sm font-bold text-slate-800">Curriculum Roadmap</h3>
                           <p className="text-xs text-slate-500">
-                            {nodes.length > 0 ? `${nodes.length} weeks · Drag to reorder` : 'Generate the roadmap to see nodes here'}
+                            {nodes.length > 0
+                              ? isRoadmapEditMode
+                                ? `${nodes.length} weeks · Drag to reorder in edit mode`
+                                : `${nodes.length} weeks · Active roadmap is currently read-only`
+                              : 'Generate the roadmap to see nodes here'}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={hasActiveRoadmap && !isRoadmapEditMode ? enableRoadmapEditMode : createRoadmapNode}
+                            disabled={roadmapLoading || pendingReorder || confirmBusy}
+                            className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                          >
+                            {roadmapPrimaryActionLabel}
+                          </button>
                           {pendingReorder && (
                             <>
                               {confirmError && <span className="text-xs text-red-500">{confirmError}</span>}
@@ -2110,18 +2709,6 @@ export default function LecturerWorkspacePage() {
                               </button>
                             </>
                           )}
-                          {/* Add week button */}
-                          <button type="button"
-                            onClick={() => {
-                              const nextWeek = nodes.length + 1;
-                              setNewItemTitle(`Week ${nextWeek}`);
-                              setNewItemWeekNo(String(nextWeek));
-                              // scroll to add-item form
-                              document.getElementById('add-roadmap-item-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            }}
-                            className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 transition">
-                            + Add Week
-                          </button>
                         </div>
                       </div>
 
@@ -2146,9 +2733,11 @@ export default function LecturerWorkspacePage() {
                                   <div key={node.id} className="flex items-center">
                                     <RoadmapNode
                                       node={node}
+                                      isEditable={isRoadmapEditMode}
                                       isSelected={selectedItemId === node.id}
                                       isDragging={dragId === node.id}
                                       isDropTarget={dropId === node.id && dragId !== node.id}
+                                      onDelete={openNodeDeleteConfirm}
                                       onSelect={(id) => setSelectedItemId((prev) => (prev === id ? null : id))}
                                       onDragStart={(e, id) => { e.dataTransfer.effectAllowed = 'move'; setDragId(id); }}
                                       onDragOver={(e, id) => { e.preventDefault(); setDropId(id); }}
@@ -2166,25 +2755,14 @@ export default function LecturerWorkspacePage() {
                                 ))}
                               </div>
                             </div>
-                            <p className="mt-2 text-center text-xs text-slate-400">Click a node to edit · Drag to reorder</p>
+                            <p className="mt-2 text-center text-xs text-slate-400">
+                              {isRoadmapEditMode
+                                ? 'Click a node to edit · Drag to reorder'
+                                : 'Click a node to view details'}
+                            </p>
                           </>
                         )}
                       </div>
-                    </div>
-
-                    {/* ── ADD ITEM FORM ───────────────────────────────────── */}
-                    <div id="add-roadmap-item-form" className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                      <h3 className="mb-3 text-sm font-bold text-slate-800">Add Week / Roadmap Item</h3>
-                      <div className="grid grid-cols-1 gap-2 md:grid-cols-2 lg:grid-cols-4">
-                        <input value={newItemTitle} onChange={(e) => setNewItemTitle(e.target.value)} placeholder="Title" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-                        <input value={newItemWeekNo} onChange={(e) => setNewItemWeekNo(e.target.value)} placeholder="Week number" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-                        <input value={newItemEstimatedHours} onChange={(e) => setNewItemEstimatedHours(e.target.value)} placeholder="Estimated hours" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-                        <button type="button" onClick={createRoadmapItem} disabled={!newItemTitle.trim() || roadmapLoading}
-                          className="rounded-xl bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50 transition">
-                          Add Item
-                        </button>
-                      </div>
-                      <textarea value={newItemDescription} onChange={(e) => setNewItemDescription(e.target.value)} rows={2} placeholder="Description (optional)" className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
                     </div>
                   </>
                 )}
@@ -2195,119 +2773,219 @@ export default function LecturerWorkspacePage() {
                 <div className="w-96 flex-none">
                   <div className="sticky top-4 rounded-2xl border border-slate-200 bg-white shadow-sm">
                     <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                      <h3 className="text-sm font-bold text-slate-800">Edit Week {selectedItem.weekNo ?? (roadmapItems.findIndex((i) => i.id === selectedItem.id) + 1)}</h3>
+                      <h3 className="text-sm font-bold text-slate-800">
+                        {isRoadmapEditMode ? 'Edit' : 'View'} Week {selectedItem.weekNo ?? (roadmapItems.findIndex((i) => i.id === selectedItem.id) + 1)}
+                      </h3>
                       <button type="button" onClick={() => setSelectedItemId(null)} className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition">
                         <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                       </button>
                     </div>
 
                     <div className="max-h-[80vh] overflow-y-auto p-4 space-y-3">
-                      <div>
-                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Title</label>
-                        <input
-                          value={selectedItem.title}
-                          onChange={(e) => {
-                            const next = e.target.value;
-                            setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, title: next } : entry));
-                          }}
-                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Description</label>
-                        <textarea
-                          value={selectedItem.description}
-                          onChange={(e) => {
-                            const next = e.target.value;
-                            setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, description: next } : entry));
-                          }}
-                          rows={3}
-                          className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
-                        />
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Week No.</label>
-                          <input type="number" value={selectedItem.weekNo ?? ''}
-                            onChange={(e) => { const next = asNumber(e.target.value); setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, weekNo: next } : entry)); }}
-                            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Est. Hours</label>
-                          <input type="number" value={selectedItem.estimatedHours ?? ''}
-                            onChange={(e) => { const next = asNumber(e.target.value); setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, estimatedHours: next } : entry)); }}
-                            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="flex gap-2 pt-1">
-                        <button type="button"
-                          onClick={() => updateRoadmapItem(selectedItem.id, { title: selectedItem.title, description: selectedItem.description || null, week_no: selectedItem.weekNo, estimated_hours: selectedItem.estimatedHours })}
-                          className="flex-1 rounded-xl bg-blue-600 py-2 text-xs font-bold text-white hover:bg-blue-500 transition">
-                          Save Changes
-                        </button>
-                        <button type="button"
-                          onClick={() => { archiveRoadmapItem(selectedItem.id); setSelectedItemId(null); }}
-                          className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 transition">
-                          Archive
-                        </button>
-                      </div>
-
-                      {/* Tasks section */}
-                      <div className="border-t border-slate-100 pt-3">
-                        <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">Assessment Tasks ({selectedItem.tasks.length})</p>
-                        {selectedItem.tasks.length === 0 && <p className="text-xs text-slate-400 italic">No tasks yet.</p>}
-                        {selectedItem.tasks.map((task, taskIdx) => {
-                          const draft = getTaskEditDraft(task);
-                          return (
-                            <div key={task.id} className="mb-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                              <div className="flex items-center justify-between">
-                                <span className="text-xs font-semibold text-slate-700">{task.title}</span>
-                                <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">{task.taskType}</span>
-                              </div>
-                              <div className="mt-2 grid grid-cols-2 gap-1">
-                                <input value={draft.title} onChange={(e) => setTaskEditDraftField(task, 'title', e.target.value)} placeholder="Title" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
-                                <select value={draft.task_type} onChange={(e) => setTaskEditDraftField(task, 'task_type', e.target.value)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs">
-                                  {TASK_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
-                                </select>
-                                <input value={draft.max_score} onChange={(e) => setTaskEditDraftField(task, 'max_score', e.target.value)} placeholder="Max score" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
-                                <input value={draft.weight} onChange={(e) => setTaskEditDraftField(task, 'weight', e.target.value)} placeholder="Weight" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
-                              </div>
-                              <textarea value={draft.description} onChange={(e) => setTaskEditDraftField(task, 'description', e.target.value)} rows={2} placeholder="Description" className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1 text-xs" />
-                              <div className="mt-1.5 flex gap-1">
-                                <button type="button" onClick={() => saveTask(task)} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">Save</button>
-                                <button type="button" onClick={() => deactivateTask(task.id)} className="rounded-lg border border-red-200 px-2 py-1 text-[10px] font-semibold text-red-600 hover:bg-red-50">Remove</button>
-                                <button type="button" onClick={() => moveTask(selectedItem, task.id, -1)} disabled={taskIdx === 0} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-40">↑</button>
-                                <button type="button" onClick={() => moveTask(selectedItem, task.id, 1)} disabled={taskIdx === selectedItem.tasks.length - 1} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-40">↓</button>
-                              </div>
+                      {isRoadmapViewMode ? (
+                        <>
+                          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Title</p>
+                            <p className="mt-1 text-sm font-semibold text-slate-800">{selectedItem.title}</p>
+                          </div>
+                          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Description</p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">
+                              {selectedItem.description || 'No description provided.'}
+                            </p>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Week No.</p>
+                              <p className="mt-1 text-sm text-slate-700">{selectedItem.weekNo ?? '--'}</p>
                             </div>
-                          );
-                        })}
-
-                        {/* Add task mini form */}
-                        {(() => {
-                          const taskCreateDraft = getTaskCreateDraft(selectedItem.id);
-                          return (
-                            <div className="mt-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-2">
-                              <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Add Task</p>
-                              <div className="grid grid-cols-2 gap-1">
-                                <input value={taskCreateDraft.title} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'title', e.target.value)} placeholder="Title" className="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-xs" />
-                                <select value={taskCreateDraft.task_type} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'task_type', e.target.value)} className="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-xs">
-                                  {TASK_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
-                                </select>
-                                <input value={taskCreateDraft.max_score} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'max_score', e.target.value)} placeholder="Max score" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
-                                <input value={taskCreateDraft.weight} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'weight', e.target.value)} placeholder="Weight" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
-                              </div>
-                              <textarea value={taskCreateDraft.description} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'description', e.target.value)} rows={2} placeholder="Description" className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1 text-xs" />
-                              <button type="button" onClick={() => createTask(selectedItem.id)} className="mt-1.5 w-full rounded-xl bg-blue-600 py-1.5 text-[10px] font-bold text-white hover:bg-blue-500">
-                                Add Task
-                              </button>
+                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Est. Hours</p>
+                              <p className="mt-1 text-sm text-slate-700">{selectedItem.estimatedHours ?? '--'}</p>
                             </div>
-                          );
-                        })()}
-                      </div>
+                          </div>
+
+                          <div className="border-t border-slate-100 pt-3">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                                Assessments ({selectedItem.tasks.length})
+                              </p>
+                              {selectedItem.tasks.length > 0 && (
+                                <span className="text-[10px] font-medium text-slate-400">
+                                  {activeAssessmentCount} active · {inactiveAssessmentCount} inactive
+                                </span>
+                              )}
+                            </div>
+                            {selectedItem.tasks.length === 0 && (
+                              <p className="text-xs text-slate-400 italic">No assessments linked to this roadmap item.</p>
+                            )}
+                            {selectedItem.tasks.map((task) => (
+                              <div
+                                key={task.id}
+                                className={`mb-2 rounded-xl border p-3 ${task.isActive ? 'border-slate-200 bg-slate-50' : 'border-slate-200 bg-slate-100/80'}`}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-xs font-semibold text-slate-700">{task.title}</span>
+                                  <div className="flex flex-wrap items-center justify-end gap-1">
+                                    <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+                                      {task.taskType}
+                                    </span>
+                                    <span
+                                      className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                                        task.isActive
+                                          ? 'bg-emerald-50 text-emerald-700'
+                                          : 'bg-slate-200 text-slate-600'
+                                      }`}
+                                    >
+                                      {task.isActive ? 'Active' : 'Inactive'}
+                                    </span>
+                                  </div>
+                                </div>
+                                {task.description && (
+                                  <p className="mt-2 text-xs text-slate-600">{task.description}</p>
+                                )}
+                                <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">
+                                  <span>Max score: {task.maxScore ?? '--'}</span>
+                                  <span>Weight: {task.weight ?? '--'}</span>
+                                  <span>Due: {task.dueAt ? new Date(task.dueAt).toLocaleString() : 'No due date'}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div>
+                            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Title</label>
+                            <input
+                              value={selectedItem.title}
+                              onChange={(e) => {
+                                const next = e.target.value;
+                                setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, title: next } : entry));
+                              }}
+                              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Description</label>
+                            <textarea
+                              value={selectedItem.description}
+                              onChange={(e) => {
+                                const next = e.target.value;
+                                setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, description: next } : entry));
+                              }}
+                              rows={3}
+                              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Week No.</label>
+                              <input type="number" value={selectedItem.weekNo ?? ''}
+                                onChange={(e) => { const next = asNumber(e.target.value); setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, weekNo: next } : entry)); }}
+                                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1">Est. Hours</label>
+                              <input type="number" value={selectedItem.estimatedHours ?? ''}
+                                onChange={(e) => { const next = asNumber(e.target.value); setRoadmapItems((prev) => prev.map((entry) => entry.id === selectedItem.id ? { ...entry, estimatedHours: next } : entry)); }}
+                                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex gap-2 pt-1">
+                            <button type="button"
+                              onClick={() => updateRoadmapItem(selectedItem.id, { title: selectedItem.title, description: selectedItem.description || null, week_no: selectedItem.weekNo, estimated_hours: selectedItem.estimatedHours })}
+                              className="flex-1 rounded-xl bg-blue-600 py-2 text-xs font-bold text-white hover:bg-blue-500 transition">
+                              Save Changes
+                            </button>
+                            <button type="button"
+                              onClick={() => { archiveRoadmapItem(selectedItem.id); setSelectedItemId(null); }}
+                              className="rounded-xl border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 transition">
+                              Archive
+                            </button>
+                          </div>
+
+                          <div className="border-t border-slate-100 pt-3">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                                Assessments ({selectedItem.tasks.length})
+                              </p>
+                              {selectedItem.tasks.length > 0 && (
+                                <span className="text-[10px] font-medium text-slate-400">
+                                  {activeAssessmentCount} active · {inactiveAssessmentCount} inactive
+                                </span>
+                              )}
+                            </div>
+                            {selectedItem.tasks.length === 0 && (
+                              <p className="text-xs text-slate-400 italic">No assessments linked to this roadmap item.</p>
+                            )}
+                            {selectedItem.tasks.map((task, taskIdx) => {
+                              const draft = getTaskEditDraft(task);
+                              return (
+                                <div
+                                  key={task.id}
+                                  className={`mb-2 rounded-xl border p-3 ${task.isActive ? 'border-slate-200 bg-slate-50' : 'border-slate-200 bg-slate-100/80'}`}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-xs font-semibold text-slate-700">{task.title}</span>
+                                    <div className="flex flex-wrap items-center justify-end gap-1">
+                                      <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">{task.taskType}</span>
+                                      <span
+                                        className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                                          task.isActive
+                                            ? 'bg-emerald-50 text-emerald-700'
+                                            : 'bg-slate-200 text-slate-600'
+                                        }`}
+                                      >
+                                        {task.isActive ? 'Active' : 'Inactive'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <div className="mt-2 grid grid-cols-2 gap-1">
+                                    <input value={draft.title} onChange={(e) => setTaskEditDraftField(task, 'title', e.target.value)} placeholder="Title" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                    <select value={draft.task_type} onChange={(e) => setTaskEditDraftField(task, 'task_type', e.target.value)} className="rounded-lg border border-slate-200 px-2 py-1 text-xs">
+                                      {TASK_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+                                    </select>
+                                    <input value={draft.max_score} onChange={(e) => setTaskEditDraftField(task, 'max_score', e.target.value)} placeholder="Max score" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                    <input value={draft.weight} onChange={(e) => setTaskEditDraftField(task, 'weight', e.target.value)} placeholder="Weight" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                  </div>
+                                  <textarea value={draft.description} onChange={(e) => setTaskEditDraftField(task, 'description', e.target.value)} rows={2} placeholder="Description" className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                  <div className="mt-1.5 flex gap-1">
+                                    <button type="button" onClick={() => saveTask(task)} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">Save</button>
+                                    <button type="button" onClick={() => deactivateTask(task.id)} className="rounded-lg border border-red-200 px-2 py-1 text-[10px] font-semibold text-red-600 hover:bg-red-50">Remove</button>
+                                    <button type="button" onClick={() => moveTask(selectedItem, task.id, -1)} disabled={taskIdx === 0} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-40">↑</button>
+                                    <button type="button" onClick={() => moveTask(selectedItem, task.id, 1)} disabled={taskIdx === selectedItem.tasks.length - 1} className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] text-slate-500 disabled:opacity-40">↓</button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+
+                            {(() => {
+                              const taskCreateDraft = getTaskCreateDraft(selectedItem.id);
+                              return (
+                                <div className="mt-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-2">
+                                  <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">Add Task</p>
+                                  <div className="grid grid-cols-2 gap-1">
+                                    <input value={taskCreateDraft.title} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'title', e.target.value)} placeholder="Title" className="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                    <select value={taskCreateDraft.task_type} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'task_type', e.target.value)} className="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-xs">
+                                      {TASK_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+                                    </select>
+                                    <input value={taskCreateDraft.max_score} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'max_score', e.target.value)} placeholder="Max score" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                    <input value={taskCreateDraft.weight} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'weight', e.target.value)} placeholder="Weight" className="rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                  </div>
+                                  <textarea value={taskCreateDraft.description} onChange={(e) => setTaskCreateDraftField(selectedItem.id, 'description', e.target.value)} rows={2} placeholder="Description" className="mt-1 w-full rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+                                  <button type="button" onClick={() => createTask(selectedItem.id)} className="mt-1.5 w-full rounded-xl bg-blue-600 py-1.5 text-[10px] font-bold text-white hover:bg-blue-500">
+                                    Add Task
+                                  </button>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2344,92 +3022,196 @@ export default function LecturerWorkspacePage() {
                 ) : studentRows.length === 0 ? (
                   <p className="text-sm text-gray-500">No students found for this offering.</p>
                 ) : (
-                  <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_1fr]">
-                    <div className="overflow-x-auto rounded-2xl border border-gray-200">
-                      <table className="min-w-full bg-white text-sm">
-                        <thead className="bg-gray-50 text-gray-600">
-                          <tr>
-                            <th className="px-3 py-2 text-left font-semibold">Name</th>
-                            <th className="px-3 py-2 text-left font-semibold">Progress</th>
-                            <th className="px-3 py-2 text-left font-semibold">Avg score</th>
-                            <th className="px-3 py-2 text-left font-semibold">Items</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {studentRows.map((row) => (
-                            <tr
-                              key={row.enrollmentId}
-                              onClick={() => setSelectedStudentEnrollmentId(row.enrollmentId)}
-                              className={`cursor-pointer border-t transition ${
-                                selectedStudentEnrollmentId === row.enrollmentId
-                                  ? 'bg-blue-50'
-                                  : 'hover:bg-gray-50'
-                              }`}
-                            >
-                              <td className="px-3 py-2">
-                                <p className="font-semibold text-gray-900">{row.fullName}</p>
-                                <p className="text-xs text-gray-500">{row.email || row.enrollmentId}</p>
-                              </td>
-                              <td className="px-3 py-2">{row.progressPercent.toFixed(0)}%</td>
-                              <td className="px-3 py-2">{row.avgScore !== null && row.avgScore !== undefined ? row.avgScore.toFixed(1) : '--'}</td>
-                              <td className="px-3 py-2">{row.itemsCompleted}/{row.totalItems}</td>
+                  <div className="grid grid-cols-1 gap-4 xl:h-[calc(100vh-17rem)] xl:grid-cols-[minmax(320px,0.95fr)_minmax(0,1.35fr)]">
+                    <div className="min-h-0 overflow-hidden rounded-2xl border border-gray-200 bg-white">
+                      <div className="max-h-[24rem] overflow-auto xl:h-full xl:max-h-none">
+                        <table className="min-w-full bg-white text-sm">
+                          <thead className="sticky top-0 z-10 bg-gray-50 text-gray-600">
+                            <tr>
+                              <th className="px-3 py-2 text-left font-semibold">Name</th>
+                              <th className="px-3 py-2 text-left font-semibold">Progress</th>
+                              <th className="px-3 py-2 text-left font-semibold">Avg score</th>
+                              <th className="px-3 py-2 text-left font-semibold">Best</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody>
+                            {studentRows.map((row) => (
+                              <tr
+                                key={row.enrollmentId}
+                                onClick={() => setSelectedStudentEnrollmentId(row.enrollmentId)}
+                                className={`cursor-pointer border-t align-top transition ${
+                                  selectedStudentEnrollmentId === row.enrollmentId
+                                    ? 'bg-blue-50'
+                                    : 'hover:bg-gray-50'
+                                }`}
+                              >
+                                <td className="px-3 py-2">
+                                  <p className="font-semibold text-gray-900">{row.fullName}</p>
+                                  <p className="text-xs text-gray-500">{row.email || `Status: ${row.status}`}</p>
+                                </td>
+                                <td className="px-3 py-2">{row.progressPercent.toFixed(0)}%</td>
+                                <td className="px-3 py-2">
+                                  {row.avgScore !== null && row.avgScore !== undefined ? row.avgScore.toFixed(1) : '--'}
+                                </td>
+                                <td className="px-3 py-2">
+                                  {row.bestItemTitle ? (
+                                    <>
+                                      <p className="max-w-[12rem] truncate font-medium text-gray-800">{row.bestItemTitle}</p>
+                                      <p className="text-xs text-gray-500">
+                                        {row.bestItemScore !== null && row.bestItemScore !== undefined
+                                          ? `${row.bestItemScore.toFixed(1)} pts`
+                                          : 'Scored'}
+                                      </p>
+                                    </>
+                                  ) : (
+                                    <span className="text-gray-400">--</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
 
-                    <div className="space-y-3">
-                      {!selectedStudentRoadmap ? (
-                        <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-500">
-                          Select a student to inspect roadmap and attempt history.
-                        </div>
-                      ) : (
-                        selectedStudentRoadmap.items.map((item) => (
-                          <div key={item.id} className="rounded-2xl border border-gray-200 bg-gray-50 p-3">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <p className="font-semibold text-gray-900">{item.title}</p>
-                              <StatusPill status={item.progress?.status || item.status} />
-                            </div>
-                            <div className="mt-2">
-                              <ProgressBar value={item.progress?.completionPercent || 0} />
-                            </div>
-                            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-                              <ScoreChip label="Total" value={item.progress?.totalScore} denominator={item.progress?.maxTotalScore} />
-                              <ScoreChip label="Average" value={item.progress?.avgScore} />
-                              <ScoreChip label="Best" value={item.progress?.bestScore} />
+                    <div className="min-h-0 overflow-hidden rounded-2xl border border-gray-200 bg-gray-50/80">
+                      <div className="max-h-[32rem] overflow-y-auto p-3 xl:h-full xl:max-h-none">
+                        {!selectedStudentRoadmap ? (
+                          <div className="rounded-2xl border border-gray-200 bg-white px-4 py-5 text-sm text-gray-500">
+                            Select a student to inspect roadmap and assessment progress.
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            <div className="rounded-2xl border border-blue-100 bg-white px-4 py-3">
+                              <p className="font-semibold text-gray-900">{selectedStudentSummary?.fullName || 'Selected student'}</p>
+                              <p className="text-xs text-gray-500">
+                                {selectedStudentSummary?.email || `Status: ${selectedStudentSummary?.status || 'active'}`}
+                              </p>
+                              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                <ScoreChip label="Progress" value={selectedStudentSummary?.progressPercent} denominator={100} />
+                                <ScoreChip label="Average" value={selectedStudentSummary?.avgScore} />
+                                <ScoreChip label="Completed" value={selectedStudentSummary?.itemsCompleted} denominator={selectedStudentSummary?.totalItems} />
+                              </div>
                             </div>
 
-                            <div className="mt-2 space-y-2">
-                              {item.tasks.map((task) => (
-                                <div key={task.id} className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs">
-                                  <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <p className="font-semibold text-gray-800">{task.title}</p>
-                                    <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] text-gray-600">
-                                      {task.taskType}
-                                    </span>
+                            {selectedStudentRoadmap.items.length === 0 ? (
+                              <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-4 py-5 text-sm text-gray-500">
+                                No active roadmap items are available for this student yet.
+                              </div>
+                            ) : (
+                              selectedStudentRoadmap.items.map((item) => {
+                                const collapseKey = `${selectedStudentEnrollmentId}:${item.id}`;
+                                const isCollapsed = Boolean(collapsedStudentItemKeys[collapseKey]);
+
+                                return (
+                                  <div key={item.id} className="rounded-2xl border border-gray-200 bg-white p-3">
+                                    <div className="flex flex-wrap items-start justify-between gap-2">
+                                      <div>
+                                        <p className="font-semibold text-gray-900">{item.title}</p>
+                                        <p className="text-xs text-gray-500">
+                                          Week {item.weekNo ?? '--'} · {item.tasks.length} assessments
+                                        </p>
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <StatusPill status={item.progress?.status || item.status} />
+                                        <button
+                                          type="button"
+                                          aria-expanded={!isCollapsed}
+                                          onClick={() => toggleStudentRoadmapCard(selectedStudentEnrollmentId, item.id)}
+                                          className="inline-flex items-center gap-1 rounded-xl border border-gray-200 px-2.5 py-1.5 text-xs font-semibold text-gray-600 hover:bg-gray-50"
+                                        >
+                                          {isCollapsed ? 'Expand' : 'Collapse'}
+                                          <svg
+                                            className={`h-3.5 w-3.5 transition ${isCollapsed ? '-rotate-90' : 'rotate-0'}`}
+                                            viewBox="0 0 20 20"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="1.8"
+                                          >
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 7.5 10 12.5 15 7.5" />
+                                          </svg>
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {!isCollapsed && (
+                                      <>
+                                        <div className="mt-3">
+                                          <ProgressBar value={item.progress?.completionPercent || 0} />
+                                        </div>
+                                        <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                                          <ScoreChip label="Total" value={item.progress?.totalScore} denominator={item.progress?.maxTotalScore} />
+                                          <ScoreChip label="Average" value={item.progress?.avgScore} />
+                                          <ScoreChip label="Best" value={item.progress?.bestScore} />
+                                        </div>
+
+                                        <div className="mt-3 space-y-2">
+                                          {item.tasks.length === 0 ? (
+                                            <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 px-3 py-3 text-xs text-gray-500">
+                                              No assessments are linked to this roadmap item.
+                                            </div>
+                                          ) : (
+                                            item.tasks.map((task) => {
+                                              const attemptCount = getTaskAttemptCount(task);
+                                              const latestStatus = getTaskLatestStatus(task);
+                                              const displayScore = getTaskDisplayScore(task);
+
+                                              return (
+                                                <div
+                                                  key={task.id}
+                                                  className={`rounded-xl border px-3 py-2 text-xs ${task.isActive ? 'border-gray-200 bg-gray-50' : 'border-gray-200 bg-slate-100/80'}`}
+                                                >
+                                                  <div className="flex flex-wrap items-start justify-between gap-2">
+                                                    <div>
+                                                      <p className="font-semibold text-gray-800">{task.title}</p>
+                                                      {task.description && (
+                                                        <p className="mt-1 text-gray-500">{task.description}</p>
+                                                      )}
+                                                    </div>
+                                                    <div className="flex flex-wrap items-center justify-end gap-1">
+                                                      <span className="rounded-full border border-gray-200 bg-white px-2 py-0.5 text-[11px] text-gray-600">
+                                                        {task.taskType}
+                                                      </span>
+                                                      <span
+                                                        className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                                                          task.isActive
+                                                            ? 'bg-emerald-50 text-emerald-700'
+                                                            : 'bg-slate-200 text-slate-600'
+                                                        }`}
+                                                      >
+                                                        {task.isActive ? 'Active' : 'Inactive'}
+                                                      </span>
+                                                      {latestStatus && <StatusPill status={latestStatus} />}
+                                                    </div>
+                                                  </div>
+
+                                                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-500">
+                                                    <span>Attempts: {attemptCount}/{task.maxAttempts}</span>
+                                                    <span>Best: {displayScore !== null && displayScore !== undefined ? displayScore.toFixed(1) : '--'}</span>
+                                                    <span>Selected attempt: {task.selectedAttemptNo ?? '--'}</span>
+                                                    <span>Due: {task.dueAt ? new Date(task.dueAt).toLocaleString() : 'No due date'}</span>
+                                                  </div>
+                                                </div>
+                                              );
+                                            })
+                                          )}
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => goToTab('assessments')}
+                                          className="mt-3 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                                        >
+                                          Open Assessments Tab
+                                        </button>
+                                      </>
+                                    )}
                                   </div>
-                                  <p className="text-gray-500">Attempts: {task.results.length}/{task.maxAttempts}</p>
-                                  {task.results.length > 0 ? (
-                                    <p className="text-gray-500">
-                                      Latest: #{task.results[task.results.length - 1]?.attemptNo || '-'} • Score {task.results[task.results.length - 1]?.score ?? '--'}
-                                    </p>
-                                  ) : (
-                                    <p className="text-gray-500">No attempts submitted yet.</p>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => goToTab('assessments')}
-                              className="mt-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
-                            >
-                              Open Assessments Tab
-                            </button>
+                                );
+                              })
+                            )}
                           </div>
-                        ))
-                      )}
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -2502,7 +3284,7 @@ export default function LecturerWorkspacePage() {
                             >
                               <td className="px-3 py-2">
                                 <p className="font-semibold text-gray-900">{row.fullName}</p>
-                                <p className="text-xs text-gray-500">{row.email || row.enrollmentId}</p>
+                                <p className="text-xs text-gray-500">{row.email || `Status: ${row.status}`}</p>
                               </td>
                               <td className="px-3 py-2">{row.progressPercent.toFixed(0)}%</td>
                               <td className="px-3 py-2">{row.avgScore !== null && row.avgScore !== undefined ? row.avgScore.toFixed(1) : '--'}</td>
@@ -2521,7 +3303,9 @@ export default function LecturerWorkspacePage() {
                         <>
                           <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
                             <p className="font-semibold text-gray-900">{selectedStudentSummary?.fullName || 'Selected student'}</p>
-                            <p className="text-xs text-gray-500">Enrollment: {selectedStudentEnrollmentId}</p>
+                            <p className="text-xs text-gray-500">
+                              {selectedStudentSummary?.email || `Status: ${selectedStudentSummary?.status || 'active'}`}
+                            </p>
                           </div>
 
                           {selectedStudentRoadmap.items.map((item) => (
@@ -2718,19 +3502,29 @@ export default function LecturerWorkspacePage() {
             )}
 
             <SectionCard title="Upload Documents" description="Upload course specs and source documents for roadmap generation and teaching context.">
+              {!uploadContextReady && (
+                <div className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+                  Select a course to upload materials
+                </div>
+              )}
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
-                <label className="flex cursor-pointer items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600 hover:border-blue-300 hover:bg-blue-50">
+                <label className={`flex items-center justify-center rounded-2xl border border-dashed px-4 py-4 text-sm ${
+                  uploadContextReady
+                    ? 'cursor-pointer border-gray-300 bg-gray-50 text-gray-600 hover:border-blue-300 hover:bg-blue-50'
+                    : 'cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400'
+                }`}>
                   <input
                     type="file"
                     className="hidden"
+                    disabled={!uploadContextReady}
                     onChange={(event) => setUploadFile(event.target.files?.[0] || null)}
                   />
-                  {uploadFile ? uploadFile.name : 'Choose document (PDF, DOCX, PPTX)'}
+                  {uploadFile ? uploadFile.name : uploadContextReady ? 'Choose document (PDF, DOCX, PPTX)' : 'Course selection required'}
                 </label>
                 <button
                   type="button"
                   onClick={uploadDocument}
-                  disabled={!uploadFile || uploading}
+                  disabled={!uploadContextReady || !uploadFile || uploading}
                   className="rounded-2xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
                 >
                   {uploading ? 'Uploading...' : 'Upload'}
@@ -2758,14 +3552,17 @@ export default function LecturerWorkspacePage() {
               }
             >
               <div className="space-y-2">
-                {recentUploads.map((upload) => (
+                {!uploadContextReady && !uploadHistoryLoading && (
+                  <p className="text-sm text-gray-500">Select a course to view uploaded materials for that context.</p>
+                )}
+                {uploadContextReady && recentUploadsForContext.map((upload) => (
                   <div key={`recent-${upload.id}-${upload.uploadedAt}`} className="rounded-2xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
                     <p className="font-semibold text-blue-800">{upload.fileName}</p>
                     <p className="text-xs text-blue-700">Document ID: {upload.id} • {new Date(upload.uploadedAt).toLocaleString()}</p>
                   </div>
                 ))}
 
-                {uploadHistory.map((upload, index) => (
+                {uploadContextReady && uploadHistory.map((upload, index) => (
                   <div key={`history-${upload?.id || index}`} className="rounded-2xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
                     <p className="font-semibold text-gray-900">{upload?.file_name || upload?.name || 'Document'}</p>
                     <p className="text-xs text-gray-500">
@@ -2775,7 +3572,7 @@ export default function LecturerWorkspacePage() {
                   </div>
                 ))}
 
-                {!uploadHistoryLoading && recentUploads.length === 0 && uploadHistory.length === 0 && (
+                {!uploadHistoryLoading && uploadContextReady && recentUploadsForContext.length === 0 && uploadHistory.length === 0 && (
                   <p className="text-sm text-gray-500">No uploads yet.</p>
                 )}
               </div>
@@ -2791,6 +3588,41 @@ export default function LecturerWorkspacePage() {
           />
         )}
       </main>
+
+      <ModalConfirm
+        open={Boolean(pendingNodeActionId)}
+        title="Are you sure?"
+        description={
+          pendingNodeAction
+            ? `Choose whether to archive or permanently delete "${pendingNodeAction.title}".`
+            : 'Choose whether to archive or permanently delete this roadmap node.'
+        }
+        cancelLabel="Cancel"
+        secondaryLabel="Archive"
+        secondaryDanger
+        confirmLabel="Delete"
+        danger
+        onCancel={closeNodeDeleteConfirm}
+        onSecondary={confirmArchiveRoadmapNode}
+        onConfirm={confirmDeleteRoadmapNode}
+        loading={nodeActionBusy}
+      />
+
+      <ModalConfirm
+        open={Boolean(pendingOfferingDeleteId)}
+        title="Delete offering?"
+        description={
+          pendingOfferingDelete
+            ? `Delete ${pendingOfferingDelete.courseCode} • ${pendingOfferingDelete.term} ${pendingOfferingDelete.year || ''}? This only works when the offering has no enrollments, specs, or roadmap data.`
+            : 'Delete this offering? This only works when the offering has no dependent data.'
+        }
+        cancelLabel="Cancel"
+        confirmLabel="Delete"
+        danger
+        onCancel={closeOfferingDeleteConfirm}
+        onConfirm={confirmDeleteOffering}
+        loading={offeringDeleteBusy}
+      />
     </div>
   );
 }

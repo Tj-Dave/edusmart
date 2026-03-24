@@ -14,7 +14,11 @@ from app.db.models import UserRole, User
 from app.db import crud_courses
 from app.models.course_schemas import (
     CourseCreate, CourseUpdate, CourseOut,
-    OfferingCreate, OfferingOut, OfferingEnrollmentKeyUpdate,
+    ActionOut,
+    OfferingCreate,
+    OfferingEnrollmentKeyUpdate,
+    OfferingOut,
+    OfferingUpdate,
 )
 
 router = APIRouter(prefix="/courses", tags=["courses"])
@@ -137,6 +141,37 @@ def set_offering_active(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.patch("/offerings/{offering_id}", response_model=OfferingOut)
+def update_offering(
+    offering_id: UUID,
+    payload: OfferingUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in {UserRole.lecturer, UserRole.admin}:
+        raise HTTPException(status_code=403, detail="Only lecturers/admin can update offerings")
+
+    existing = crud_courses.get_offering(db, offering_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Offering not found")
+
+    if (
+        current_user.role == UserRole.lecturer
+        and existing.lecturer_user_id
+        and str(existing.lecturer_user_id) != str(current_user.id)
+    ):
+        raise HTTPException(status_code=403, detail="Lecturers can only update their own offerings")
+
+    try:
+        return crud_courses.update_offering(
+            db,
+            offering_id=offering_id,
+            **payload.model_dump(exclude_unset=True),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.patch("/offerings/{offering_id}/enrollment-key", response_model=OfferingOut)
 def set_offering_enrollment_key(
     offering_id: UUID,
@@ -155,6 +190,33 @@ def set_offering_enrollment_key(
             enrollment_key=payload.enrollment_key,
             auto_generate=payload.auto_generate,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/offerings/{offering_id}", response_model=ActionOut)
+def delete_offering(
+    offering_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in {UserRole.lecturer, UserRole.admin}:
+        raise HTTPException(status_code=403, detail="Only lecturers/admin can delete offerings")
+
+    existing = crud_courses.get_offering(db, offering_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Offering not found")
+
+    if (
+        current_user.role == UserRole.lecturer
+        and existing.lecturer_user_id
+        and str(existing.lecturer_user_id) != str(current_user.id)
+    ):
+        raise HTTPException(status_code=403, detail="Lecturers can only delete their own offerings")
+
+    try:
+        crud_courses.delete_offering(db, offering_id=offering_id)
+        return {"ok": True, "message": "Offering deleted"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

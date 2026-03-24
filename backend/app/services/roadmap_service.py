@@ -405,3 +405,29 @@ def archive_roadmap_item(
     db.commit()
     db.refresh(item)
     return item
+
+
+def delete_roadmap_item(
+    db: Session,
+    *,
+    item_id: UUID,
+    actor: User,
+) -> None:
+    item = db.query(OfferingRoadmapItem).filter(OfferingRoadmapItem.id == item_id).one_or_none()
+    if not item:
+        raise ServiceNotFoundError("Roadmap item not found")
+    require_lecturer_or_admin_for_offering(db, offering_id=item.course_offering_id, actor=actor)
+
+    offering_id = str(item.course_offering_id)
+    deleted_item_id = str(item.id)
+
+    db.delete(item)
+
+    emit_event_for_offering_enrollments(
+        db,
+        offering_id=offering_id,
+        event_type="roadmap_item_deleted",
+        actor_user_id=str(actor.id),
+        note={"roadmap_item_id": deleted_item_id},
+    )
+    db.commit()
