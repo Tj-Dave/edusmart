@@ -38,6 +38,8 @@ anaconda/
 
 data/
 backend/data/
+docs/BIO1101/
+docs/CS102/
 
 logs/
 *.log
