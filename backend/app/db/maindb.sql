@@ -237,6 +237,327 @@ ALTER TABLE IF EXISTS enrollment_task_results
     ADD COLUMN IF NOT EXISTS rubric_scores_json JSONB;
 
 -- ------------------------------------------------------------
+-- Versioned hybrid grading upgrade
+-- ------------------------------------------------------------
+DO $$
+BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'attempt_score_source') THEN
+                CREATE TYPE attempt_score_source AS ENUM ('manual', 'ai_accepted', 'hybrid', 'legacy');
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'component_score_source') THEN
+                CREATE TYPE component_score_source AS ENUM ('manual', 'ai_accepted', 'legacy');
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ai_evaluation_status') THEN
+                CREATE TYPE ai_evaluation_status AS ENUM ('pending', 'running', 'completed', 'failed');
+        END IF;
+END$$;
+
+CREATE TABLE IF NOT EXISTS grading_templates (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name              TEXT NOT NULL,
+    description       TEXT NULL,
+    is_active         BOOLEAN NOT NULL DEFAULT true,
+    latest_version_no INTEGER NOT NULL DEFAULT 1,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT grading_templates_name_not_empty CHECK (length(trim(name)) > 0),
+    CONSTRAINT grading_templates_latest_version_min_1 CHECK (latest_version_no >= 1)
+);
+CREATE INDEX IF NOT EXISTS idx_grading_templates_owner ON grading_templates(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_grading_templates_active ON grading_templates(is_active);
+
+CREATE TABLE IF NOT EXISTS grading_template_versions (
+    id                        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    template_id               UUID NOT NULL REFERENCES grading_templates(id) ON DELETE CASCADE,
+    version_no                INTEGER NOT NULL,
+    scheme_name               TEXT NULL,
+    auto_grading_enabled      BOOLEAN NOT NULL DEFAULT false,
+    auto_grading_instructions TEXT NULL,
+    created_by_user_id        UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_grading_template_version UNIQUE (template_id, version_no),
+    CONSTRAINT grading_template_versions_version_min_1 CHECK (version_no >= 1)
+);
+
+CREATE TABLE IF NOT EXISTS grading_template_components (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    template_version_id UUID NOT NULL REFERENCES grading_template_versions(id) ON DELETE CASCADE,
+    component_key       TEXT NOT NULL,
+    label               TEXT NOT NULL,
+    description         TEXT NULL,
+    max_points          NUMERIC(6,2) NOT NULL,
+    display_order       INTEGER NOT NULL DEFAULT 0,
+    is_auto_gradable    BOOLEAN NOT NULL DEFAULT false,
+    manual_only         BOOLEAN NOT NULL DEFAULT false,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_grading_template_component_key UNIQUE (template_version_id, component_key),
+    CONSTRAINT grading_template_components_key_not_empty CHECK (length(trim(component_key)) > 0),
+    CONSTRAINT grading_template_components_label_not_empty CHECK (length(trim(label)) > 0),
+    CONSTRAINT grading_template_components_points_positive CHECK (max_points > 0),
+    CONSTRAINT grading_template_components_display_order_nonneg CHECK (display_order >= 0),
+    CONSTRAINT grading_template_components_manual_only_rule CHECK ((manual_only = false) OR (is_auto_gradable = false))
+);
+
+CREATE TABLE IF NOT EXISTS grading_template_rubric_levels (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    component_id   UUID NOT NULL REFERENCES grading_template_components(id) ON DELETE CASCADE,
+    label         TEXT NOT NULL,
+    min_points    NUMERIC(6,2) NOT NULL,
+    max_points    NUMERIC(6,2) NOT NULL,
+    descriptor    TEXT NOT NULL,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT grading_template_rubric_label_not_empty CHECK (length(trim(label)) > 0),
+    CONSTRAINT grading_template_rubric_descriptor_not_empty CHECK (length(trim(descriptor)) > 0),
+    CONSTRAINT grading_template_rubric_min_nonneg CHECK (min_points >= 0),
+    CONSTRAINT grading_template_rubric_range_valid CHECK (max_points >= min_points),
+    CONSTRAINT grading_template_rubric_display_order_nonneg CHECK (display_order >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS task_grading_scheme_versions (
+    id                         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id                    UUID NOT NULL REFERENCES roadmap_assessment_tasks(id) ON DELETE CASCADE,
+    version_no                 INTEGER NOT NULL,
+    scheme_name                TEXT NULL,
+    source_template_version_id UUID NULL REFERENCES grading_template_versions(id) ON DELETE SET NULL,
+    auto_grading_enabled       BOOLEAN NOT NULL DEFAULT false,
+    auto_grading_instructions  TEXT NULL,
+    created_by_user_id         UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_task_grading_scheme_version UNIQUE (task_id, version_no),
+    CONSTRAINT task_grading_scheme_versions_version_min_1 CHECK (version_no >= 1)
+);
+
+CREATE TABLE IF NOT EXISTS task_grading_components (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scheme_version_id UUID NOT NULL REFERENCES task_grading_scheme_versions(id) ON DELETE CASCADE,
+    component_key     TEXT NOT NULL,
+    label             TEXT NOT NULL,
+    description       TEXT NULL,
+    max_points        NUMERIC(6,2) NOT NULL,
+    display_order     INTEGER NOT NULL DEFAULT 0,
+    is_auto_gradable  BOOLEAN NOT NULL DEFAULT false,
+    manual_only       BOOLEAN NOT NULL DEFAULT false,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_task_grading_component_key UNIQUE (scheme_version_id, component_key),
+    CONSTRAINT task_grading_components_key_not_empty CHECK (length(trim(component_key)) > 0),
+    CONSTRAINT task_grading_components_label_not_empty CHECK (length(trim(label)) > 0),
+    CONSTRAINT task_grading_components_points_positive CHECK (max_points > 0),
+    CONSTRAINT task_grading_components_display_order_nonneg CHECK (display_order >= 0),
+    CONSTRAINT task_grading_components_manual_only_rule CHECK ((manual_only = false) OR (is_auto_gradable = false))
+);
+
+CREATE TABLE IF NOT EXISTS task_component_rubric_levels (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    component_id   UUID NOT NULL REFERENCES task_grading_components(id) ON DELETE CASCADE,
+    label         TEXT NOT NULL,
+    min_points    NUMERIC(6,2) NOT NULL,
+    max_points    NUMERIC(6,2) NOT NULL,
+    descriptor    TEXT NOT NULL,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT task_component_rubric_label_not_empty CHECK (length(trim(label)) > 0),
+    CONSTRAINT task_component_rubric_descriptor_not_empty CHECK (length(trim(descriptor)) > 0),
+    CONSTRAINT task_component_rubric_min_nonneg CHECK (min_points >= 0),
+    CONSTRAINT task_component_rubric_range_valid CHECK (max_points >= min_points),
+    CONSTRAINT task_component_rubric_display_order_nonneg CHECK (display_order >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS attempt_ai_evaluations (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    attempt_id            UUID NOT NULL REFERENCES enrollment_task_results(id) ON DELETE CASCADE,
+    status                ai_evaluation_status NOT NULL DEFAULT 'pending',
+    trigger_source        TEXT NULL,
+    provider              TEXT NULL,
+    model_name            TEXT NULL,
+    overall_confidence    NUMERIC(5,4) NULL,
+    suggested_total_score NUMERIC(6,2) NULL,
+    raw_response_json     JSONB NULL,
+    error_text            TEXT NULL,
+    started_at            TIMESTAMPTZ NULL,
+    completed_at          TIMESTAMPTZ NULL,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT attempt_ai_eval_confidence_range CHECK ((overall_confidence IS NULL) OR (overall_confidence >= 0 AND overall_confidence <= 1)),
+    CONSTRAINT attempt_ai_eval_total_nonneg CHECK ((suggested_total_score IS NULL) OR (suggested_total_score >= 0))
+);
+
+CREATE TABLE IF NOT EXISTS attempt_ai_component_suggestions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    evaluation_id   UUID NOT NULL REFERENCES attempt_ai_evaluations(id) ON DELETE CASCADE,
+    component_id    UUID NOT NULL REFERENCES task_grading_components(id) ON DELETE CASCADE,
+    suggested_score NUMERIC(6,2) NOT NULL,
+    confidence      NUMERIC(5,4) NULL,
+    rationale       TEXT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_attempt_ai_component_suggestion UNIQUE (evaluation_id, component_id),
+    CONSTRAINT attempt_ai_component_suggestion_score_nonneg CHECK (suggested_score >= 0),
+    CONSTRAINT attempt_ai_component_suggestion_confidence_range CHECK ((confidence IS NULL) OR (confidence >= 0 AND confidence <= 1))
+);
+
+CREATE TABLE IF NOT EXISTS attempt_component_scores (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    attempt_id         UUID NOT NULL REFERENCES enrollment_task_results(id) ON DELETE CASCADE,
+    component_id       UUID NOT NULL REFERENCES task_grading_components(id) ON DELETE CASCADE,
+    score              NUMERIC(6,2) NOT NULL,
+    feedback           TEXT NULL,
+    source             component_score_source NOT NULL DEFAULT 'manual',
+    created_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_attempt_component_score UNIQUE (attempt_id, component_id),
+    CONSTRAINT attempt_component_score_nonneg CHECK (score >= 0)
+);
+
+ALTER TABLE IF EXISTS roadmap_assessment_tasks
+    ADD COLUMN IF NOT EXISTS current_grading_scheme_version_id UUID;
+
+ALTER TABLE IF EXISTS enrollment_task_results
+    ADD COLUMN IF NOT EXISTS score_source attempt_score_source NULL,
+    ADD COLUMN IF NOT EXISTS grading_scheme_version_id UUID NULL,
+    ADD COLUMN IF NOT EXISTS latest_ai_evaluation_id UUID NULL,
+    ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMPTZ NULL,
+    ADD COLUMN IF NOT EXISTS submission_text TEXT NULL;
+
+DO $$
+BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_roadmap_tasks_current_grading_scheme_version') THEN
+                ALTER TABLE roadmap_assessment_tasks
+                    ADD CONSTRAINT fk_roadmap_tasks_current_grading_scheme_version
+                    FOREIGN KEY (current_grading_scheme_version_id) REFERENCES task_grading_scheme_versions(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_enrollment_task_results_grading_scheme_version') THEN
+                ALTER TABLE enrollment_task_results
+                    ADD CONSTRAINT fk_enrollment_task_results_grading_scheme_version
+                    FOREIGN KEY (grading_scheme_version_id) REFERENCES task_grading_scheme_versions(id) ON DELETE SET NULL;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_enrollment_task_results_latest_ai_evaluation') THEN
+                ALTER TABLE enrollment_task_results
+                    ADD CONSTRAINT fk_enrollment_task_results_latest_ai_evaluation
+                    FOREIGN KEY (latest_ai_evaluation_id) REFERENCES attempt_ai_evaluations(id) ON DELETE SET NULL;
+        END IF;
+END$$;
+
+CREATE INDEX IF NOT EXISTS idx_roadmap_tasks_current_scheme ON roadmap_assessment_tasks(current_grading_scheme_version_id);
+CREATE INDEX IF NOT EXISTS idx_enrollment_task_scheme ON enrollment_task_results(grading_scheme_version_id);
+CREATE INDEX IF NOT EXISTS idx_enrollment_task_latest_ai_eval ON enrollment_task_results(latest_ai_evaluation_id);
+
+INSERT INTO task_grading_scheme_versions (id, task_id, version_no, scheme_name, auto_grading_enabled, created_at)
+SELECT gen_random_uuid(), t.id, 1, t.title, false, now()
+FROM roadmap_assessment_tasks t
+WHERE NOT EXISTS (SELECT 1 FROM task_grading_scheme_versions s WHERE s.task_id = t.id);
+
+INSERT INTO task_grading_components (
+    id, scheme_version_id, component_key, label, description, max_points, display_order, is_auto_gradable, manual_only, created_at
+)
+SELECT gen_random_uuid(), s.id, 'overall', 'Overall', NULL, t.max_score, 0, false, false, now()
+FROM task_grading_scheme_versions s
+JOIN roadmap_assessment_tasks t ON t.id = s.task_id
+WHERE NOT EXISTS (SELECT 1 FROM task_grading_components c WHERE c.scheme_version_id = s.id)
+  AND (t.rubric_json IS NULL OR t.rubric_json = '{}'::jsonb);
+
+INSERT INTO task_grading_components (
+    id, scheme_version_id, component_key, label, description, max_points, display_order, is_auto_gradable, manual_only, created_at
+)
+SELECT
+    gen_random_uuid(),
+    s.id,
+    lower(regexp_replace(trim(kv.key), '[^a-zA-Z0-9]+', '_', 'g')),
+    trim(kv.key),
+    NULL,
+    NULLIF(kv.value, '')::NUMERIC(6,2),
+    ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY kv.key) - 1,
+    false,
+    false,
+    now()
+FROM task_grading_scheme_versions s
+JOIN roadmap_assessment_tasks t ON t.id = s.task_id
+CROSS JOIN LATERAL jsonb_each_text(t.rubric_json) kv
+WHERE NOT EXISTS (SELECT 1 FROM task_grading_components c WHERE c.scheme_version_id = s.id)
+  AND t.rubric_json IS NOT NULL
+  AND t.rubric_json <> '{}'::jsonb;
+
+UPDATE roadmap_assessment_tasks t
+SET current_grading_scheme_version_id = s.id
+FROM task_grading_scheme_versions s
+WHERE s.task_id = t.id
+  AND s.version_no = 1
+  AND t.current_grading_scheme_version_id IS NULL;
+
+UPDATE enrollment_task_results etr
+SET grading_scheme_version_id = t.current_grading_scheme_version_id,
+    finalized_at = COALESCE(etr.finalized_at, etr.graded_at),
+    score_source = COALESCE(etr.score_source, CASE WHEN etr.score IS NOT NULL THEN 'legacy'::attempt_score_source ELSE NULL END)
+FROM roadmap_assessment_tasks t
+WHERE t.id = etr.task_id
+  AND etr.grading_scheme_version_id IS NULL;
+
+INSERT INTO attempt_component_scores (
+    id, attempt_id, component_id, score, feedback, source, created_by_user_id, created_at, updated_at
+)
+SELECT
+    gen_random_uuid(),
+    etr.id,
+    c.id,
+    NULLIF(kv.value, '')::NUMERIC(6,2),
+    NULL,
+    'legacy'::component_score_source,
+    etr.graded_by_user_id,
+    COALESCE(etr.graded_at, etr.created_at, now()),
+    COALESCE(etr.updated_at, now())
+FROM enrollment_task_results etr
+JOIN task_grading_components c ON c.scheme_version_id = etr.grading_scheme_version_id
+CROSS JOIN LATERAL jsonb_each_text(COALESCE(etr.rubric_scores_json, '{}'::jsonb)) kv
+WHERE etr.rubric_scores_json IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM attempt_component_scores acs WHERE acs.attempt_id = etr.id)
+  AND (
+      lower(c.label) = lower(trim(kv.key))
+      OR lower(c.component_key) = lower(regexp_replace(trim(kv.key), '[^a-zA-Z0-9]+', '_', 'g'))
+  );
+
+INSERT INTO attempt_component_scores (
+    id, attempt_id, component_id, score, feedback, source, created_by_user_id, created_at, updated_at
+)
+SELECT
+    gen_random_uuid(),
+    etr.id,
+    c.id,
+    etr.score,
+    NULL,
+    'legacy'::component_score_source,
+    etr.graded_by_user_id,
+    COALESCE(etr.graded_at, etr.created_at, now()),
+    COALESCE(etr.updated_at, now())
+FROM enrollment_task_results etr
+JOIN task_grading_components c ON c.scheme_version_id = etr.grading_scheme_version_id
+WHERE etr.score IS NOT NULL
+  AND lower(c.component_key) = 'overall'
+  AND NOT EXISTS (SELECT 1 FROM attempt_component_scores acs WHERE acs.attempt_id = etr.id);
+
+DO $$
+BEGIN
+        IF to_regclass('public.grading_templates') IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_grading_templates_updated_at') THEN
+                CREATE TRIGGER trg_grading_templates_updated_at
+                BEFORE UPDATE ON grading_templates
+                FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+        END IF;
+        IF to_regclass('public.attempt_ai_evaluations') IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_attempt_ai_evaluations_updated_at') THEN
+                CREATE TRIGGER trg_attempt_ai_evaluations_updated_at
+                BEFORE UPDATE ON attempt_ai_evaluations
+                FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+        END IF;
+        IF to_regclass('public.attempt_component_scores') IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_attempt_component_scores_updated_at') THEN
+                CREATE TRIGGER trg_attempt_component_scores_updated_at
+                BEFORE UPDATE ON attempt_component_scores
+                FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+        END IF;
+END$$;
+
+-- ------------------------------------------------------------
 -- Gamification upgrade (kept here so maindb.sql is self-contained)
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS student_gamification_profiles (

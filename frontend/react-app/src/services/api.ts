@@ -849,6 +849,102 @@ export const progressApi = {
   },
 };
 
+// ==================== Assessment / Grading Endpoints ====================
+export const assessmentApi = {
+  listForOffering: async (token: string, offeringId: string) => {
+    const response = await fetch(`${API_BASE_URL}/offerings/${offeringId}/assessments`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  create: async (token: string, roadmapItemId: string, payload: Record<string, unknown>) => {
+    const response = await fetch(`${API_BASE_URL}/roadmap-items/${roadmapItemId}/assessments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  update: async (token: string, assessmentId: string, payload: Record<string, unknown>) => {
+    const response = await fetch(`${API_BASE_URL}/assessments/${assessmentId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  setActive: async (token: string, assessmentId: string, isActive: boolean) => {
+    const response = await fetch(`${API_BASE_URL}/assessments/${assessmentId}/active`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ is_active: isActive }),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  listSubmissions: async (token: string, assessmentId: string) => {
+    const response = await fetch(`${API_BASE_URL}/assessments/${assessmentId}/submissions`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  getSubmission: async (token: string, submissionId: string) => {
+    const response = await fetch(`${API_BASE_URL}/submissions/${submissionId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  runAiGrade: async (token: string, submissionId: string) => {
+    const response = await fetch(`${API_BASE_URL}/submissions/${submissionId}/ai-grade`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  finalizeSubmission: async (token: string, submissionId: string, payload: Record<string, unknown>) => {
+    const response = await fetch(`${API_BASE_URL}/submissions/${submissionId}/finalize`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+
+  listTemplates: async (token: string) => {
+    const response = await fetch(`${API_BASE_URL}/grading-templates`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(await safeParseError(response));
+    return response.json();
+  },
+};
+
 // ==================== Lecturer Roadmap / Spec Endpoints ====================
 export const roadmapAdminApi = {
   extractSpec: async (

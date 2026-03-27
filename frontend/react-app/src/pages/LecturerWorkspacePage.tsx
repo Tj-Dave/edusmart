@@ -14,6 +14,7 @@ import WorkspaceTabs from '../components/lecturer/WorkspaceTabs';
 import MetricCard from '../components/lecturer/MetricCard';
 import SectionCard from '../components/lecturer/SectionCard';
 import LecturerAssistantPanel from '../components/lecturer/LecturerAssistantPanel';
+import LecturerAssessmentsWorkspace from '../components/lecturer/LecturerAssessmentsWorkspace';
 import InlineErrorBanner from '../components/tools/InlineErrorBanner';
 import ModalConfirm from '../components/tools/ModalConfirm';
 import ProgressBar from '../components/tools/ProgressBar';
@@ -73,17 +74,6 @@ interface TaskResultRow {
   rubricScores?: Record<string, number> | null;
   submittedAt?: string | null;
   gradedAt?: string | null;
-}
-
-interface GradeDraft {
-  score: string;
-  feedback: string;
-  rubric_scores: string;
-}
-
-interface RubricRowDraft {
-  criterion: string;
-  value: string;
 }
 
 interface TaskRow {
@@ -267,12 +257,6 @@ const TASK_TYPE_OPTIONS = [
 
 const ROADMAP_CONTEXT_TABS: LecturerTab[] = ['roadmap', 'students', 'assessments', 'uploads', 'assistant'];
 
-const defaultGradeDraft = (): GradeDraft => ({
-  score: '',
-  feedback: '',
-  rubric_scores: '',
-});
-
 const parseOptionalJsonObject = (value: string): Record<string, unknown> | null => {
   const raw = value.trim();
   if (!raw) return null;
@@ -367,89 +351,6 @@ const buildSpecJsonText = (spec: VisualSpecState, existingJsonText: string): str
     null,
     2
   );
-};
-
-const parseOptionalRubricScores = (value: string): Record<string, number> | null => {
-  const raw = value.trim();
-  if (!raw) return null;
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error('Rubric scores must be valid JSON.');
-  }
-
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Rubric scores must be a JSON object.');
-  }
-
-  const out: Record<string, number> = {};
-  for (const [key, valueEntry] of Object.entries(parsed as Record<string, unknown>)) {
-    const numeric = Number(valueEntry);
-    if (!Number.isFinite(numeric)) {
-      throw new Error(`Rubric score for "${key}" must be numeric.`);
-    }
-    out[key] = numeric;
-  }
-
-  return out;
-};
-
-const rubricRowsFromJsonText = (value: string): RubricRowDraft[] => {
-  const raw = value.trim();
-  if (!raw) return [];
-
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
-    return Object.entries(parsed as Record<string, unknown>).map(([criterion, numeric]) => ({
-      criterion,
-      value: numeric === null || numeric === undefined ? '' : String(numeric),
-    }));
-  } catch {
-    return [];
-  }
-};
-
-const rubricJsonTextFromRows = (rows: RubricRowDraft[]): string => {
-  const out: Record<string, number> = {};
-  for (const row of rows) {
-    const key = row.criterion.trim();
-    const numeric = Number(row.value);
-    if (!key || !Number.isFinite(numeric)) continue;
-    out[key] = numeric;
-  }
-  if (Object.keys(out).length === 0) return '';
-  return JSON.stringify(out, null, 2);
-};
-
-const setRubricRowField = (
-  jsonText: string,
-  rowIndex: number,
-  field: keyof RubricRowDraft,
-  value: string
-): string => {
-  const rows = rubricRowsFromJsonText(jsonText);
-  while (rows.length <= rowIndex) {
-    rows.push({ criterion: '', value: '' });
-  }
-  rows[rowIndex] = {
-    ...rows[rowIndex],
-    [field]: value,
-  };
-  return rubricJsonTextFromRows(rows);
-};
-
-const addRubricRow = (jsonText: string): string => {
-  const rows = rubricRowsFromJsonText(jsonText);
-  rows.push({ criterion: `criterion_${rows.length + 1}`, value: '0' });
-  return rubricJsonTextFromRows(rows);
-};
-
-const removeRubricRow = (jsonText: string, rowIndex: number): string => {
-  const rows = rubricRowsFromJsonText(jsonText).filter((_, index) => index !== rowIndex);
-  return rubricJsonTextFromRows(rows);
 };
 
 const parseRows = <T,>(raw: unknown, keys: string[]): T[] => {
@@ -839,9 +740,6 @@ export default function LecturerWorkspacePage() {
   const [selectedStudentEnrollmentId, setSelectedStudentEnrollmentId] = useState('');
   const [studentRoadmapByEnrollment, setStudentRoadmapByEnrollment] = useState<Record<string, ParsedRoadmap>>({});
   const [collapsedStudentItemKeys, setCollapsedStudentItemKeys] = useState<Record<string, boolean>>({});
-  const [assessmentStatusFilter, setAssessmentStatusFilter] = useState<'all' | 'submitted' | 'graded' | 'in_progress' | 'not_started'>('submitted');
-  const [gradingByAttempt, setGradingByAttempt] = useState<Record<string, boolean>>({});
-  const [gradeDraftByAttempt, setGradeDraftByAttempt] = useState<Record<string, GradeDraft>>({});
 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -1897,83 +1795,10 @@ export default function LecturerWorkspacePage() {
   };
 
   useEffect(() => {
-    if (activeTab !== 'students' && activeTab !== 'assessments') return;
+    if (activeTab !== 'students') return;
     loadStudents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, selectedOfferingId]);
-
-  const attemptKey = (enrollmentId: string, taskId: string, attemptNo?: number) =>
-    `${enrollmentId}:${taskId}:${attemptNo ?? 0}`;
-
-  const getGradeDraft = (enrollmentId: string, taskId: string, attempt: TaskResultRow): GradeDraft => {
-    const key = attemptKey(enrollmentId, taskId, attempt.attemptNo);
-    const existing = gradeDraftByAttempt[key];
-    if (existing) return existing;
-
-    return {
-      score: attempt.score !== null && attempt.score !== undefined ? String(attempt.score) : '',
-      feedback: attempt.feedback || '',
-      rubric_scores: attempt.rubricScores ? JSON.stringify(attempt.rubricScores, null, 2) : '',
-    };
-  };
-
-  const setGradeDraftField = <K extends keyof GradeDraft>(
-    enrollmentId: string,
-    taskId: string,
-    attemptNo: number | undefined,
-    field: K,
-    value: GradeDraft[K]
-  ) => {
-    const key = attemptKey(enrollmentId, taskId, attemptNo);
-    const current = gradeDraftByAttempt[key] || defaultGradeDraft();
-    setGradeDraftByAttempt((prev) => ({
-      ...prev,
-      [key]: {
-        ...current,
-        [field]: value,
-      },
-    }));
-  };
-
-  const gradeAttempt = async (
-    enrollmentId: string,
-    taskId: string,
-    attempt: TaskResultRow
-  ) => {
-    if (!token || attempt.attemptNo === undefined || attempt.attemptNo === null) return;
-
-    const key = attemptKey(enrollmentId, taskId, attempt.attemptNo);
-    const draft = getGradeDraft(enrollmentId, taskId, attempt);
-    const score = asNumber(draft.score);
-    if (score === null) {
-      setStudentsError('Score is required and must be numeric.');
-      return;
-    }
-
-    let rubricScores: Record<string, number> | null = null;
-    try {
-      rubricScores = parseOptionalRubricScores(draft.rubric_scores);
-    } catch (error: any) {
-      setStudentsError(error?.message || 'Rubric scores are invalid.');
-      return;
-    }
-
-    setGradingByAttempt((prev) => ({ ...prev, [key]: true }));
-    setStudentsError(null);
-
-    try {
-      await progressApi.gradeAttempt(token, enrollmentId, taskId, attempt.attemptNo, {
-        score,
-        feedback: draft.feedback.trim() || undefined,
-        rubric_scores: rubricScores || undefined,
-      });
-      await loadStudents();
-    } catch (requestError: any) {
-      setStudentsError(requestError?.message || 'Failed to grade attempt.');
-    } finally {
-      setGradingByAttempt((prev) => ({ ...prev, [key]: false }));
-    }
-  };
 
   const loadUploadHistory = async () => {
     if (!token || !isLecturerSurface) return;
@@ -3221,274 +3046,12 @@ export default function LecturerWorkspacePage() {
         )}
 
         {activeTab === 'assessments' && (
-          <div className="space-y-4">
-            <InlineErrorBanner message={studentsError} />
-
-            {!selectedOffering ? (
-              <SectionCard title="Assessments" description="Select an offering to grade student attempts.">
-                <p className="text-sm text-gray-500">No offering selected.</p>
-              </SectionCard>
-            ) : (
-              <SectionCard
-                title="Assessment & Grading"
-                description="Lecturer grading workspace for practical and theory tasks."
-                actions={
-                  <div className="flex flex-wrap items-center gap-2">
-                    <select
-                      value={assessmentStatusFilter}
-                      onChange={(event) => setAssessmentStatusFilter(event.target.value as 'all' | 'submitted' | 'graded' | 'in_progress' | 'not_started')}
-                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700"
-                    >
-                      <option value="submitted">Submitted</option>
-                      <option value="all">All statuses</option>
-                      <option value="graded">Graded</option>
-                      <option value="in_progress">In progress</option>
-                      <option value="not_started">Not started</option>
-                    </select>
-                    <button
-                      type="button"
-                      onClick={loadStudents}
-                      disabled={studentsLoading}
-                      className="rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      {studentsLoading ? 'Refreshing...' : 'Refresh'}
-                    </button>
-                  </div>
-                }
-              >
-                {studentsLoading ? (
-                  <p className="text-sm text-gray-500">Loading assessment data...</p>
-                ) : studentRows.length === 0 ? (
-                  <p className="text-sm text-gray-500">No students found for this offering.</p>
-                ) : (
-                  <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.1fr_1.3fr]">
-                    <div className="overflow-x-auto rounded-2xl border border-gray-200">
-                      <table className="min-w-full bg-white text-sm">
-                        <thead className="bg-gray-50 text-gray-600">
-                          <tr>
-                            <th className="px-3 py-2 text-left font-semibold">Student</th>
-                            <th className="px-3 py-2 text-left font-semibold">Progress</th>
-                            <th className="px-3 py-2 text-left font-semibold">Avg score</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {studentRows.map((row) => (
-                            <tr
-                              key={`assessment-${row.enrollmentId}`}
-                              onClick={() => setSelectedStudentEnrollmentId(row.enrollmentId)}
-                              className={`cursor-pointer border-t transition ${
-                                selectedStudentEnrollmentId === row.enrollmentId
-                                  ? 'bg-blue-50'
-                                  : 'hover:bg-gray-50'
-                              }`}
-                            >
-                              <td className="px-3 py-2">
-                                <p className="font-semibold text-gray-900">{row.fullName}</p>
-                                <p className="text-xs text-gray-500">{row.email || `Status: ${row.status}`}</p>
-                              </td>
-                              <td className="px-3 py-2">{row.progressPercent.toFixed(0)}%</td>
-                              <td className="px-3 py-2">{row.avgScore !== null && row.avgScore !== undefined ? row.avgScore.toFixed(1) : '--'}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <div className="space-y-3">
-                      {!selectedStudentRoadmap ? (
-                        <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-500">
-                          Select a student to view submitted attempts.
-                        </div>
-                      ) : (
-                        <>
-                          <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
-                            <p className="font-semibold text-gray-900">{selectedStudentSummary?.fullName || 'Selected student'}</p>
-                            <p className="text-xs text-gray-500">
-                              {selectedStudentSummary?.email || `Status: ${selectedStudentSummary?.status || 'active'}`}
-                            </p>
-                          </div>
-
-                          {selectedStudentRoadmap.items.map((item) => (
-                            <div key={`assess-item-${item.id}`} className="rounded-2xl border border-gray-200 bg-gray-50 p-3">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <p className="font-semibold text-gray-900">{item.title}</p>
-                                <StatusPill status={item.progress?.status || item.status} />
-                              </div>
-
-                              <div className="mt-2 space-y-2">
-                                {item.tasks.map((task) => {
-                                  const attempts = task.results.filter((attempt) => {
-                                    if (assessmentStatusFilter === 'all') return true;
-                                    return (attempt.status || '').toLowerCase() === assessmentStatusFilter;
-                                  });
-
-                                  if (attempts.length === 0) return null;
-
-                                  return (
-                                    <div key={`assess-task-${task.id}`} className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs">
-                                      <div className="flex flex-wrap items-center justify-between gap-2">
-                                        <p className="font-semibold text-gray-800">{task.title}</p>
-                                        <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] text-gray-600">
-                                          {task.taskType}
-                                        </span>
-                                      </div>
-
-                                      <div className="mt-2 space-y-2">
-                                        {attempts.map((attempt) => {
-                                          const key = attemptKey(selectedStudentEnrollmentId, task.id, attempt.attemptNo);
-                                          const draft = getGradeDraft(selectedStudentEnrollmentId, task.id, attempt);
-                                          const isBusy = Boolean(gradingByAttempt[key]);
-
-                                          return (
-                                            <div key={attempt.id || key} className="rounded-lg border border-gray-200 bg-gray-50 p-2">
-                                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                                <p className="font-medium text-gray-700">Attempt #{attempt.attemptNo || '-'}</p>
-                                                <StatusPill status={attempt.status || 'not_started'} />
-                                              </div>
-                                              <p className="mt-1 text-gray-500">
-                                                Submitted: {attempt.submittedAt ? new Date(attempt.submittedAt).toLocaleString() : 'Not submitted'}
-                                              </p>
-                                              <p className="text-gray-500">Current score: {attempt.score ?? '--'}</p>
-                                              {attempt.evidenceUrl && (
-                                                <a className="text-blue-600 underline" href={attempt.evidenceUrl} target="_blank" rel="noreferrer">
-                                                  Evidence
-                                                </a>
-                                              )}
-                                              {attempt.artifactUrl && (
-                                                <a className="ml-2 text-blue-600 underline" href={attempt.artifactUrl} target="_blank" rel="noreferrer">
-                                                  Artifact
-                                                </a>
-                                              )}
-                                              {attempt.reflectionText && (
-                                                <p className="mt-1 whitespace-pre-wrap text-gray-600">Reflection: {attempt.reflectionText}</p>
-                                              )}
-
-                                              <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
-                                                <input
-                                                  value={draft.score}
-                                                  onChange={(event) => setGradeDraftField(selectedStudentEnrollmentId, task.id, attempt.attemptNo, 'score', event.target.value)}
-                                                  placeholder="Score"
-                                                  className="rounded-lg border border-gray-200 px-2 py-1 text-xs"
-                                                />
-                                                <textarea
-                                                  value={draft.feedback}
-                                                  onChange={(event) => setGradeDraftField(selectedStudentEnrollmentId, task.id, attempt.attemptNo, 'feedback', event.target.value)}
-                                                  rows={2}
-                                                  placeholder="Feedback"
-                                                  className="rounded-lg border border-gray-200 px-2 py-1 text-xs md:col-span-2"
-                                                />
-                                              </div>
-
-                                              <textarea
-                                                value={draft.rubric_scores}
-                                                onChange={(event) => setGradeDraftField(selectedStudentEnrollmentId, task.id, attempt.attemptNo, 'rubric_scores', event.target.value)}
-                                                rows={2}
-                                                placeholder='Rubric scores JSON, e.g. {"correctness": 34, "process": 27}'
-                                                className="mt-2 w-full rounded-lg border border-gray-200 px-2 py-1 text-xs font-mono"
-                                              />
-
-                                              {(() => {
-                                                const rubricRows = rubricRowsFromJsonText(draft.rubric_scores);
-                                                return (
-                                                  <div className="mt-2 rounded-lg border border-gray-200 bg-white p-2">
-                                                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-gray-500">Rubric Scores Builder</p>
-                                                    <div className="mt-2 space-y-2">
-                                                      {rubricRows.map((row, rubricIndex) => (
-                                                        <div
-                                                          key={`grade-rubric-${selectedStudentEnrollmentId}-${task.id}-${attempt.attemptNo}-${rubricIndex}`}
-                                                          className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_120px_auto]"
-                                                        >
-                                                          <input
-                                                            value={row.criterion}
-                                                            onChange={(event) =>
-                                                              setGradeDraftField(
-                                                                selectedStudentEnrollmentId,
-                                                                task.id,
-                                                                attempt.attemptNo,
-                                                                'rubric_scores',
-                                                                setRubricRowField(draft.rubric_scores, rubricIndex, 'criterion', event.target.value)
-                                                              )
-                                                            }
-                                                            placeholder="Criterion"
-                                                            className="rounded-lg border border-gray-200 px-2 py-1 text-xs"
-                                                          />
-                                                          <input
-                                                            value={row.value}
-                                                            onChange={(event) =>
-                                                              setGradeDraftField(
-                                                                selectedStudentEnrollmentId,
-                                                                task.id,
-                                                                attempt.attemptNo,
-                                                                'rubric_scores',
-                                                                setRubricRowField(draft.rubric_scores, rubricIndex, 'value', event.target.value)
-                                                              )
-                                                            }
-                                                            placeholder="Score"
-                                                            className="rounded-lg border border-gray-200 px-2 py-1 text-xs"
-                                                          />
-                                                          <button
-                                                            type="button"
-                                                            onClick={() =>
-                                                              setGradeDraftField(
-                                                                selectedStudentEnrollmentId,
-                                                                task.id,
-                                                                attempt.attemptNo,
-                                                                'rubric_scores',
-                                                                removeRubricRow(draft.rubric_scores, rubricIndex)
-                                                              )
-                                                            }
-                                                            className="rounded-lg border border-red-200 px-2 py-1 text-[11px] font-semibold text-red-600 hover:bg-red-50"
-                                                          >
-                                                            Remove
-                                                          </button>
-                                                        </div>
-                                                      ))}
-                                                    </div>
-                                                    <button
-                                                      type="button"
-                                                      onClick={() =>
-                                                        setGradeDraftField(
-                                                          selectedStudentEnrollmentId,
-                                                          task.id,
-                                                          attempt.attemptNo,
-                                                          'rubric_scores',
-                                                          addRubricRow(draft.rubric_scores)
-                                                        )
-                                                      }
-                                                      className="mt-2 rounded-lg border border-gray-200 px-2 py-1 text-[11px] font-semibold text-gray-700 hover:bg-gray-100"
-                                                    >
-                                                      Add criterion
-                                                    </button>
-                                                  </div>
-                                                );
-                                              })()}
-
-                                              <button
-                                                type="button"
-                                                onClick={() => gradeAttempt(selectedStudentEnrollmentId, task.id, attempt)}
-                                                disabled={isBusy}
-                                                className="mt-2 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
-                                              >
-                                                {isBusy ? 'Grading...' : 'Grade Attempt'}
-                                              </button>
-                                            </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          ))}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </SectionCard>
-            )}
-          </div>
+          <LecturerAssessmentsWorkspace
+            token={token}
+            selectedOfferingId={selectedOfferingId}
+            selectedOffering={selectedOffering}
+            onOpenRoadmapTab={() => goToTab('roadmap')}
+          />
         )}
 
         {activeTab === 'uploads' && (

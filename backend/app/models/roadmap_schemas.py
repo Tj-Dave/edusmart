@@ -66,6 +66,46 @@ class RoadmapItemUpdateRequest(BaseModel):
     status: Literal["draft", "approved_active", "archived"] | None = None
 
 
+class RubricLevelInput(BaseModel):
+    component_key: str = Field(..., min_length=1, max_length=120)
+    label: str = Field(..., min_length=1, max_length=200)
+    min_points: float = Field(..., ge=0)
+    max_points: float = Field(..., ge=0)
+    descriptor: str = Field(..., min_length=1)
+    display_order: int = Field(default=0, ge=0)
+
+
+class GradingComponentInput(BaseModel):
+    key: str = Field(..., min_length=1, max_length=120)
+    label: str = Field(..., min_length=1, max_length=200)
+    description: str | None = None
+    max_points: float = Field(..., gt=0)
+    display_order: int = Field(default=0, ge=0)
+    is_auto_gradable: bool = False
+    manual_only: bool = False
+
+
+class GradingSchemeInput(BaseModel):
+    scheme_name: str | None = Field(default=None, max_length=200)
+    auto_grading_enabled: bool = False
+    auto_grading_instructions: str | None = None
+    components: list[GradingComponentInput] = Field(default_factory=list, min_length=1)
+    rubric_levels: list[RubricLevelInput] = Field(default_factory=list)
+
+
+class GradingTemplateCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str | None = None
+    grading_scheme: GradingSchemeInput
+
+
+class GradingTemplateUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    is_active: bool | None = None
+    grading_scheme: GradingSchemeInput | None = None
+
+
 class TaskCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     task_type: str = "quiz"
@@ -85,6 +125,8 @@ class TaskCreateRequest(BaseModel):
     attempt_scoring_rule: Literal["best", "latest", "average", "first"] = "best"
     allow_late_submission: bool = False
     late_penalty_percent: float | None = Field(default=None, ge=0, le=100)
+    grading_template_version_id: UUID | None = None
+    grading_scheme: GradingSchemeInput | None = None
 
 
 class TaskUpdateRequest(BaseModel):
@@ -106,10 +148,86 @@ class TaskUpdateRequest(BaseModel):
     attempt_scoring_rule: Literal["best", "latest", "average", "first"] | None = None
     allow_late_submission: bool | None = None
     late_penalty_percent: float | None = Field(default=None, ge=0, le=100)
+    grading_template_version_id: UUID | None = None
+    grading_scheme: GradingSchemeInput | None = None
 
 
 class TaskReorderRequest(BaseModel):
     task_ids: list[UUID] = Field(default_factory=list, min_length=1)
+
+
+class RubricLevelOut(BaseModel):
+    id: UUID
+    component_key: str
+    label: str
+    min_points: float
+    max_points: float
+    descriptor: str
+    display_order: int
+
+    class Config:
+        from_attributes = True
+
+
+class GradingComponentOut(BaseModel):
+    id: UUID
+    key: str
+    label: str
+    description: str | None
+    max_points: float
+    display_order: int
+    is_auto_gradable: bool
+    manual_only: bool
+    rubric_levels: list[RubricLevelOut] = []
+
+    class Config:
+        from_attributes = True
+
+
+class TaskGradingSchemeOut(BaseModel):
+    id: UUID
+    task_id: UUID
+    version_no: int
+    scheme_name: str | None
+    source_template_version_id: UUID | None
+    auto_grading_enabled: bool
+    auto_grading_instructions: str | None
+    created_by_user_id: UUID | None
+    created_at: Any
+    components: list[GradingComponentOut] = []
+
+    class Config:
+        from_attributes = True
+
+
+class GradingTemplateVersionOut(BaseModel):
+    id: UUID
+    template_id: UUID
+    version_no: int
+    scheme_name: str | None
+    auto_grading_enabled: bool
+    auto_grading_instructions: str | None
+    created_by_user_id: UUID | None
+    created_at: Any
+    components: list[GradingComponentOut] = []
+
+    class Config:
+        from_attributes = True
+
+
+class GradingTemplateOut(BaseModel):
+    id: UUID
+    owner_user_id: UUID
+    name: str
+    description: str | None
+    is_active: bool
+    latest_version_no: int
+    created_at: Any
+    updated_at: Any
+    versions: list[GradingTemplateVersionOut] = []
+
+    class Config:
+        from_attributes = True
 
 
 class RoadmapTaskOut(BaseModel):
@@ -133,11 +251,27 @@ class RoadmapTaskOut(BaseModel):
     attempt_scoring_rule: str
     allow_late_submission: bool
     late_penalty_percent: float | None
+    current_grading_scheme_version_id: UUID | None
     created_at: Any
     updated_at: Any
 
     class Config:
         from_attributes = True
+
+
+class AssessmentTaskOut(RoadmapTaskOut):
+    current_grading_scheme: TaskGradingSchemeOut | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class AssessmentRoadmapGroupOut(BaseModel):
+    roadmap_item_id: UUID
+    roadmap_item_title: str
+    roadmap_item_week_no: int | None = None
+    roadmap_item_status: str
+    assessments: list[AssessmentTaskOut] = []
 
 
 class RoadmapItemOut(BaseModel):
@@ -188,15 +322,20 @@ class EnrollmentTaskResultOut(BaseModel):
     status: str
     attempt_no: int
     score: float | None
+    score_source: str | None
     max_score_snapshot: float
     weight_snapshot: float | None
+    grading_scheme_version_id: UUID | None
+    latest_ai_evaluation_id: UUID | None
     submitted_at: Any | None
     graded_at: Any | None
+    finalized_at: Any | None
     graded_by_user_id: UUID | None
     feedback: str | None
     evidence_url: str | None
     artifact_url: str | None
     reflection_text: str | None
+    submission_text: str | None
     rubric_scores_json: dict[str, Any] | None
     created_at: Any
     updated_at: Any
@@ -241,6 +380,7 @@ class AttemptCreateRequest(BaseModel):
     evidence_url: str | None = None
     artifact_url: str | None = None
     reflection_text: str | None = None
+    submission_text: str | None = None
     payload: dict[str, Any] | None = None
 
 
@@ -248,13 +388,126 @@ class AttemptSubmitRequest(BaseModel):
     evidence_url: str | None = None
     artifact_url: str | None = None
     reflection_text: str | None = None
+    submission_text: str | None = None
     payload: dict[str, Any] | None = None
 
 
-class AttemptGradeRequest(BaseModel):
+class AttemptComponentScoreInput(BaseModel):
+    component_key: str = Field(..., min_length=1, max_length=120)
     score: float = Field(..., ge=0)
     feedback: str | None = None
+
+
+class AttemptGradeRequest(BaseModel):
+    score: float | None = Field(default=None, ge=0)
+    feedback: str | None = None
     rubric_scores: dict[str, float] | None = None
+    component_scores: list[AttemptComponentScoreInput] | None = None
+    use_ai_suggestions: bool = False
+
+
+class AttemptComponentScoreOut(BaseModel):
+    id: UUID
+    component_id: UUID
+    component_key: str
+    component_label: str
+    max_points: float
+    score: float
+    feedback: str | None
+    source: str
+    created_by_user_id: UUID | None
+    created_at: Any
+    updated_at: Any
+
+    class Config:
+        from_attributes = True
+
+
+class AttemptAiComponentSuggestionOut(BaseModel):
+    id: UUID
+    component_id: UUID
+    component_key: str
+    component_label: str
+    max_points: float
+    suggested_score: float
+    confidence: float | None
+    rationale: str | None
+    created_at: Any
+
+    class Config:
+        from_attributes = True
+
+
+class AttemptAiEvaluationOut(BaseModel):
+    id: UUID
+    status: str
+    trigger_source: str | None
+    provider: str | None
+    model_name: str | None
+    overall_confidence: float | None
+    suggested_total_score: float | None
+    error_text: str | None
+    started_at: Any | None
+    completed_at: Any | None
+    created_at: Any
+    updated_at: Any
+    component_suggestions: list[AttemptAiComponentSuggestionOut] = []
+
+    class Config:
+        from_attributes = True
+
+
+class AssessmentSubmissionListItemOut(BaseModel):
+    id: UUID
+    enrollment_id: UUID
+    task_id: UUID
+    attempt_no: int
+    student_user_id: UUID
+    student_name: str
+    student_email: str | None = None
+    student_identifier: str | None = None
+    status: str
+    workflow_status: str
+    score: float | None = None
+    submitted_at: Any | None = None
+    graded_at: Any | None = None
+    finalized_at: Any | None = None
+    feedback: str | None = None
+    submission_text: str | None = None
+    latest_ai_evaluation_status: str | None = None
+
+
+class AttemptGradingDetailOut(BaseModel):
+    attempt: EnrollmentTaskResultOut
+    grading_scheme: TaskGradingSchemeOut | None
+    component_scores: list[AttemptComponentScoreOut] = []
+    latest_ai_evaluation: AttemptAiEvaluationOut | None = None
+
+
+class SubmissionStudentOut(BaseModel):
+    user_id: UUID
+    username: str
+    full_name: str | None = None
+    email: str | None = None
+    university_id: str | None = None
+
+
+class SubmissionRoadmapItemOut(BaseModel):
+    id: UUID
+    title: str
+    week_no: int | None = None
+    status: str
+
+
+class SubmissionDetailOut(BaseModel):
+    attempt: EnrollmentTaskResultOut
+    grading_scheme: TaskGradingSchemeOut | None
+    component_scores: list[AttemptComponentScoreOut] = []
+    latest_ai_evaluation: AttemptAiEvaluationOut | None = None
+    student: SubmissionStudentOut
+    assessment: AssessmentTaskOut
+    roadmap_item: SubmissionRoadmapItemOut
+    workflow_status: str
 
 
 class AttemptActionOut(BaseModel):
@@ -265,3 +518,15 @@ class AttemptActionOut(BaseModel):
 class GenericActionOut(BaseModel):
     ok: bool = True
     message: str
+
+
+class AssessmentActiveUpdateRequest(BaseModel):
+    is_active: bool
+
+
+class SubmissionFinalizeRequest(BaseModel):
+    score: float | None = Field(default=None, ge=0)
+    feedback: str | None = None
+    rubric_scores: dict[str, float] | None = None
+    component_scores: list[AttemptComponentScoreInput] | None = None
+    use_ai_suggestions: bool = False

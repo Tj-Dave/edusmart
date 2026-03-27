@@ -21,6 +21,7 @@ from app.services.domain_errors import (
     ServiceValidationError,
 )
 from app.services.event_service import emit_event_for_offering_enrollments
+from app.services.grading_scheme_service import create_task_grading_scheme_version
 
 
 def _to_float(v: Any) -> float | None:
@@ -235,6 +236,29 @@ def generate_roadmap_from_spec(
                 late_penalty_percent=_to_float(t.get("late_penalty_percent")),
             )
             db.add(task)
+            db.flush()
+            create_task_grading_scheme_version(
+                db,
+                task=task,
+                grading_scheme={
+                    "scheme_name": task.title,
+                    "auto_grading_enabled": False,
+                    "auto_grading_instructions": None,
+                    "components": [
+                        {
+                            "key": "overall",
+                            "label": "Overall",
+                            "description": None,
+                            "max_points": float(task.max_score),
+                            "display_order": 0,
+                            "is_auto_gradable": False,
+                            "manual_only": False,
+                        }
+                    ],
+                    "rubric_levels": [],
+                },
+                actor_user_id=str(actor.id),
+            )
 
         refresh_assessment_task_count(db, roadmap_item_id=item.id)
         created_items.append(item)
