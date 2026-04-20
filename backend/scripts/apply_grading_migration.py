@@ -69,8 +69,9 @@ def apply_sql_file(connection, path: Path, *, dry_run: bool) -> None:
 
     sql_text = path.read_text(encoding="utf-8")
     try:
-        with connection.cursor() as cursor:
-            cursor.execute(sql_text)
+        with connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql_text)
     except PsycopgError as err:
         position = None
         if getattr(err, "diag", None) is not None and getattr(err.diag, "statement_position", None):
@@ -121,7 +122,7 @@ def main() -> int:
     connection = None
     try:
         connection = psycopg2.connect(database_url)
-        connection.autocommit = True
+        connection.autocommit = False
 
         run_base = args.force_base
         if not args.force_base:

@@ -80,7 +80,7 @@ async def upload_document(
     pipeline = get_pipeline()
 
     # Save uploaded file
-    uploads_dir = Path(settings.BASE_DIR) / "data" / "uploads" / _safe_filename(course_id)
+    uploads_dir = settings.ingestion_uploads_dir_path / _safe_filename(course_id)
     uploads_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = _safe_filename(file.filename)

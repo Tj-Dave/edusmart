@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
+import { API_BASE_URL } from "../services/api";
 
 const NotificationContext = createContext();
 
@@ -9,8 +10,12 @@ export const NotificationProvider = ({ userId, children }) => {
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
+    if (!userId) {
+      return undefined;
+    }
+
     const eventSource = new EventSource(
-      `http://localhost:8000/notifications/stream/${userId}`
+      `${API_BASE_URL}/notifications/stream/${userId}`
     );
 
     eventSource.addEventListener("notification", (event) => {
@@ -23,8 +28,10 @@ export const NotificationProvider = ({ userId, children }) => {
   }, [userId]);
 
   const markAsRead = async (id) => {
-    await fetch(`http://localhost:8000/notifications/${id}/read`, {
+    const token = window.localStorage.getItem("auth_token");
+    await fetch(`${API_BASE_URL}/notifications/${id}/read`, {
       method: "PATCH",
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     });
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))

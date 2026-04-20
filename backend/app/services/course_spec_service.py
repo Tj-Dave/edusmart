@@ -326,7 +326,7 @@ def extract_course_spec_from_upload(
         _text_extraction_error = None
 
     # ── Step 2: Save to disk ──
-    docs_dir = Path(settings.BASE_DIR) / "docs" / _safe_segment(str(offering.course_code)) / str(offering.id)
+    docs_dir = settings.course_specs_docs_dir_path / _safe_segment(str(offering.course_code)) / str(offering.id)
     docs_dir.mkdir(parents=True, exist_ok=True)
 
     storage_path = _resolve_unique_path(docs_dir, safe_name)

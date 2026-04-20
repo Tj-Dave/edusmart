@@ -21,7 +21,8 @@ class VectorStore:
     DEFAULT_COLLECTION = "documents"
 
     def __init__(self):
-        db_path = Path(settings.BASE_DIR) / "data" / "chroma_db"
+        db_path = settings.vector_db_path
+        db_path.mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=str(db_path))
         self._collections: Dict[str, Any] = {}
 

@@ -1,11 +1,16 @@
 from functools import lru_cache
-from pydantic_settings import BaseSettings
-from typing import List, ClassVar
 from pathlib import Path
-import os
-from dotenv import load_dotenv
+from typing import ClassVar, List
 
-load_dotenv()  # loads backend/.env
+from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+BACKEND_DIR = PROJECT_ROOT / "backend"
+BACKEND_ENV_FILE = BACKEND_DIR / ".env"
+
+load_dotenv(BACKEND_ENV_FILE)
 
 class Settings(BaseSettings):
     # =====================================================
@@ -18,8 +23,11 @@ class Settings(BaseSettings):
 
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
+    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
 
-    BASE_DIR: ClassVar[Path] = Path(__file__).resolve().parents[3]
+    PROJECT_ROOT: ClassVar[Path] = PROJECT_ROOT
+    BACKEND_DIR: ClassVar[Path] = BACKEND_DIR
+    BASE_DIR: ClassVar[Path] = PROJECT_ROOT
 
     # =====================================================
     # FastAPI / Server Settings
@@ -32,7 +40,7 @@ class Settings(BaseSettings):
     # Database Configuration
     # =====================================================
 
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+    DATABASE_URL: str = ""
 
     # =====================================================
     # llama.cpp (shared)
@@ -90,6 +98,7 @@ class Settings(BaseSettings):
 
     EMBEDDING_MODEL_NAME: str = "intfloat/e5-base-v2"
     EMBEDDING_DEVICE: str = "cpu"          # cpu | cuda (future)
+    BLOOM_EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
 
     # =====================================================
     # Vector Database (ChromaDB)
@@ -109,6 +118,8 @@ class Settings(BaseSettings):
     LECTURER_UPLOADS_DIR: str = "./data/lecturer_uploads"
     RAW_IMAGES_DIR: str = "./data/raw_images"
     EMBEDDINGS_DIR: str = "./data/embeddings"
+    INGESTION_UPLOADS_DIR: str = "./data/uploads"
+    COURSE_SPECS_DOCS_DIR: str = "./docs"
 
     # =====================================================
     # File Upload & Ingestion Settings
@@ -133,8 +144,6 @@ class Settings(BaseSettings):
     # =====================================================
 
     SECRET_KEY: str = "change_this_in_production"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24h
@@ -189,8 +198,50 @@ class Settings(BaseSettings):
     def allowed_file_types_list(self) -> List[str]:
         return [ft.strip().lower() for ft in self.ALLOWED_FILE_TYPES.split(",")]
 
+    def _resolve_path(self, path_value: str | Path) -> Path:
+        path = Path(path_value).expanduser()
+        if path.is_absolute():
+            return path
+        return (self.PROJECT_ROOT / path).resolve()
+
+    @property
+    def cors_origins(self) -> List[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @property
+    def vector_db_path(self) -> Path:
+        return self._resolve_path(self.VECTOR_DB_PATH)
+
+    @property
+    def data_root_path(self) -> Path:
+        return self._resolve_path(self.DATA_ROOT)
+
+    @property
+    def curriculum_docs_dir_path(self) -> Path:
+        return self._resolve_path(self.CURRICULUM_DOCS_DIR)
+
+    @property
+    def lecturer_uploads_dir_path(self) -> Path:
+        return self._resolve_path(self.LECTURER_UPLOADS_DIR)
+
+    @property
+    def raw_images_dir_path(self) -> Path:
+        return self._resolve_path(self.RAW_IMAGES_DIR)
+
+    @property
+    def embeddings_dir_path(self) -> Path:
+        return self._resolve_path(self.EMBEDDINGS_DIR)
+
+    @property
+    def ingestion_uploads_dir_path(self) -> Path:
+        return self._resolve_path(self.INGESTION_UPLOADS_DIR)
+
+    @property
+    def course_specs_docs_dir_path(self) -> Path:
+        return self._resolve_path(self.COURSE_SPECS_DOCS_DIR)
+
     class Config:
-        env_file = ".env"
+        env_file = str(BACKEND_ENV_FILE)
         env_file_encoding = "utf-8"
         case_sensitive = True
 

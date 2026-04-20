@@ -1,0 +1,22 @@
+[Unit]
+Description=EduSmart Backend (University Prototype)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=edusmart
+Group=www-data
+WorkingDirectory=/opt/edusmart/current/backend
+EnvironmentFile=/opt/edusmart/current/backend/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/edusmart/current/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

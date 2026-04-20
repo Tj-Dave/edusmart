@@ -2,7 +2,20 @@
 import { User, TokenResponse } from '../types/auth';
 import { SetupStatus } from '../types/institution';
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000';
+const resolveApiBaseUrl = (): string => {
+  const configured = (import.meta.env.VITE_API_URL as string | undefined)?.trim();
+  if (configured) {
+    return configured.replace(/\/+$/, '');
+  }
+
+  if (typeof window !== 'undefined' && !import.meta.env.DEV) {
+    return window.location.origin.replace(/\/+$/, '');
+  }
+
+  return 'http://localhost:8000';
+};
+
+export const API_BASE_URL = resolveApiBaseUrl();
 
 // ==================== Setup Endpoints ====================
 export const setupApi = {

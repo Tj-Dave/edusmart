@@ -3,6 +3,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.db.postgres import engine
 
 from app.services.llm.llama_cpp_client import LLMClient
@@ -29,15 +30,12 @@ from app.routes.progress import router as progress_router
 from app.routes.gamification import router as gamification_router
 from app.routes.notifications_sse import router as notifications_sse_router
 
-app = FastAPI(title="EduSmart Backend")
+app = FastAPI(title=settings.APP_NAME)
 
 # ✅ CORS for Vite frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,9 +47,15 @@ llm_subclient = LLMSubclient()
 multi_query_service = MultiQuery(llm_subclient)
 
 vector_store = VectorStore()
-embedder = E5Embedder(device="cpu")
+embedder = E5Embedder(
+    model_name=settings.EMBEDDING_MODEL_NAME,
+    device=settings.EMBEDDING_DEVICE,
+)
 competency_mapper = CompetencyMapper(embedder)
-bloom_detector = BloomDetector()
+bloom_detector = BloomDetector(
+    model_name=settings.BLOOM_EMBEDDING_MODEL_NAME,
+    device=settings.EMBEDDING_DEVICE,
+)
 rag_engine = RAGEngine(vector_store=vector_store, embedder=embedder)
 
 memory_manager = MemoryManagerPG(
