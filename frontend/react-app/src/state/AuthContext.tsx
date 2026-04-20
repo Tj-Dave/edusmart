@@ -7,6 +7,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -14,6 +15,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
     const cachedUserRaw = localStorage.getItem('auth_user');
+
+    setToken(token);
 
     if (cachedUserRaw) {
       try {
@@ -43,6 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (isAuthError) {
           localStorage.removeItem('auth_token');
           localStorage.removeItem('auth_user');
+          setToken(null);
           setUser(null);
           setError('Session expired. Please login again.');
           return;
@@ -64,6 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const response = await authApi.login(email, password);
       localStorage.setItem('auth_token', response.access_token);
       localStorage.setItem('auth_user', JSON.stringify(response.user));
+      setToken(response.access_token);
       setUser(response.user);
     } catch (err: any) {
       const message = err.message || 'Login failed';
@@ -122,12 +127,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = () => {
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_user');
+    setToken(null);
     setUser(null);
     setError(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, error, login, register, logout, setPassword }}>
+    <AuthContext.Provider value={{ user, token, isLoading, error, login, register, logout, setPassword }}>
       {children}
     </AuthContext.Provider>
   );

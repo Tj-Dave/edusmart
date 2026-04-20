@@ -84,7 +84,9 @@ async def run_ai_pipeline(
     competency = competency_mapper.map(user_query)
 
     # 4) rag retrieve (course-scoped)
-    context_chunks = rag_engine.retrieve(user_query, course_id=course_id)
+    retrieved_context = rag_engine.retrieve_bundle(user_query, course_id=course_id)
+    context_chunks = [row.get("context", "") for row in retrieved_context]
+    citations = [row.get("citation", {}) for row in retrieved_context if row.get("citation")]
 
     # 5) build prompt
     final_prompt = PromptEngine.build_prompt(
@@ -99,7 +101,7 @@ async def run_ai_pipeline(
     response_text = await run_in_threadpool(llm_client.generate, final_prompt)
 
     # 7) store assistant message
-    crud_chats.append_message(
+    assistant_message = crud_chats.append_message(
         db,
         user_id=user_id,
         session_id=session_id,
@@ -117,6 +119,8 @@ async def run_ai_pipeline(
         prompt=final_prompt,
         response=response_text,
         course_id=course_id,
+        citations=citations,
+        message_id=int(assistant_message.id) if getattr(assistant_message, "id", None) is not None else None,
     )
 
 

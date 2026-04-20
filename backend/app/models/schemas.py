@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 from uuid import UUID
 
 class QueryRequest(BaseModel):
@@ -12,6 +14,8 @@ class QueryResponse(BaseModel):
     prompt: str
     response: str
     course_id: str
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    message_id: int | None = None
 
 class IngestResponse(BaseModel):
     query: str

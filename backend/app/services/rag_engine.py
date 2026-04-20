@@ -19,10 +19,21 @@ class RAGEngine:
             n_results=n_results,
             where=None,
         )
-        # convert results to your context chunk format...
-        return self._format_results(results)
+        return [row["context"] for row in self._format_results_bundle(results)]
 
-    def _format_results(self, results: Dict[str, Any]) -> List[str]:
+    def retrieve_bundle(self, query: str, *, course_id: str, n_results: int = 5) -> List[Dict[str, Any]]:
+        course_id = course_id.strip() or "documents"
+        collection = self.vector_store.course_collection_name(course_id)
+        qvec = self.embedder.embed_query(query)
+        results = self.vector_store.query_embeddings(
+            collection=collection,
+            query_embeddings=[qvec],
+            n_results=n_results,
+            where=None,
+        )
+        return self._format_results_bundle(results)
+
+    def _format_results_bundle(self, results: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Chroma returns:
         {
@@ -37,8 +48,10 @@ class RAGEngine:
         metas = (results.get("metadatas") or [[]])[0]
         dists = (results.get("distances") or [[]])[0]
 
-        out: List[str] = []
-        for doc, md, dist in zip(docs, metas, dists):
+        ids = (results.get("ids") or [[]])[0]
+
+        out: List[Dict[str, Any]] = []
+        for idx, (doc, md, dist) in enumerate(zip(docs, metas, dists)):
             if not doc:
                 continue
             md = md or {}
@@ -58,8 +71,25 @@ class RAGEngine:
             if loc:
                 prefix += f" ({loc})"
 
-            # Keep it compact
-            out.append(f"{prefix}\n{doc.strip()}")
+            snippet = doc.strip()
+            out.append(
+                {
+                    "context": f"{prefix}\n{snippet}",
+                    "citation": {
+                        "id": md.get("document_id") or (ids[idx] if idx < len(ids) else None),
+                        "title": heading or src,
+                        "snippet": snippet[:280],
+                        "source": src,
+                        "role": md.get("uploader_role"),
+                        "uploader_role": md.get("uploader_role"),
+                        "url": md.get("url") or md.get("source_url"),
+                        "document_id": md.get("document_id"),
+                        "content_type": ctype,
+                        "page": page,
+                        "slide": slide,
+                    },
+                    "distance": dist,
+                }
+            )
 
         return out
-

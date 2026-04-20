@@ -64,6 +64,9 @@ function ChatRoute() {
   if (isLoading) {
     return <AuthLoadingScreen />;
   }
+  if (!user) {
+    return <ChatPage publicMode />;
+  }
   if (user?.role === 'lecturer') {
     return <Navigate to="/lecturer" replace />;
   }

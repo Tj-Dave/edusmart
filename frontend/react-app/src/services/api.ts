@@ -768,7 +768,7 @@ export const progressApi = {
     token: string,
     enrollmentId: string,
     taskId: string,
-    payload?: { evidence_url?: string; artifact_url?: string; reflection_text?: string; payload?: unknown }
+    payload?: { evidence_url?: string; artifact_url?: string; reflection_text?: string; submission_text?: string; payload?: unknown }
   ) => {
     const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/tasks/${taskId}/attempts`, {
       method: 'POST',
@@ -787,7 +787,7 @@ export const progressApi = {
     enrollmentId: string,
     taskId: string,
     attemptNo: number,
-    payload: { evidence_url?: string; artifact_url?: string; reflection_text?: string; payload?: unknown }
+    payload: { evidence_url?: string; artifact_url?: string; reflection_text?: string; submission_text?: string; payload?: unknown }
   ) => {
     const response = await fetch(`${API_BASE_URL}/enrollments/${enrollmentId}/tasks/${taskId}/attempts/${attemptNo}/submit`, {
       method: 'POST',

@@ -317,13 +317,13 @@ async def chat_query_atomic(
             limit=limit,
         )
 
-        assistant_message_id = _extract_latest_assistant_message_id(msgs)
+        assistant_message_id = getattr(pipeline_result, "message_id", None) or _extract_latest_assistant_message_id(msgs)
 
         return {
             "session": s,
             "messages": msgs,
             "response": getattr(pipeline_result, "response", "") or "",
-            "citations": [],  # you can wire this later from rag chunks if you expose them
+            "citations": getattr(pipeline_result, "citations", []) or [],
             "message_id": assistant_message_id,
         }
 

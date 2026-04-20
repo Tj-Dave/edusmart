@@ -14,8 +14,9 @@ import {
   EnrollmentRoadmapProgress,
   RoadmapItem,
   RoadmapResponse,
-  TaskResult,
 } from '../../types/progress';
+import type { EnrollmentCourseContext } from '../../modules/student/types';
+import { parseRoadmapResponse, sortAssessmentTasks } from '../../modules/student/adapters/roadmapAdapter';
 import EditableField from './EditableField';
 import EmptyStateCard from './EmptyStateCard';
 import InlineErrorBanner from './InlineErrorBanner';
@@ -24,12 +25,7 @@ import ProgressBar from './ProgressBar';
 import ScoreChip from './ScoreChip';
 import StatusPill from './StatusPill';
 
-export interface EnrollmentCourseContext {
-  courseCode: string;
-  courseName?: string;
-  enrollmentId: string;
-  offeringId?: string;
-}
+export type { EnrollmentCourseContext } from '../../modules/student/types';
 
 interface CourseOption {
   code: string;
@@ -116,112 +112,6 @@ const toIsoDate = (value?: string | null) => {
   return date.toLocaleString();
 };
 
-const normalizeTaskResult = (raw: any): TaskResult => ({
-  id: raw?.id?.toString?.() || raw?.result_id?.toString?.() || undefined,
-  enrollment_id: raw?.enrollment_id?.toString?.(),
-  roadmap_item_id: raw?.roadmap_item_id?.toString?.(),
-  task_id: raw?.task_id?.toString?.(),
-  attempt_no: asNumber(raw?.attempt_no) || undefined,
-  status: raw?.status,
-  score: asNumber(raw?.score),
-  feedback: raw?.feedback ?? null,
-  evidence_url: raw?.evidence_url ?? null,
-  rubric_scores_json:
-    raw?.rubric_scores_json && typeof raw.rubric_scores_json === 'object'
-      ? raw.rubric_scores_json
-      : null,
-  payload: raw?.payload,
-  submitted_at: raw?.submitted_at ?? null,
-  graded_at: raw?.graded_at ?? null,
-  graded_by_user_id: raw?.graded_by_user_id?.toString?.() ?? null,
-  is_late: typeof raw?.is_late === 'boolean' ? raw.is_late : null,
-  created_at: raw?.created_at,
-  updated_at: raw?.updated_at,
-});
-
-const normalizeTask = (raw: any): AssessmentTask => ({
-  id: raw?.id?.toString?.() || raw?.task_id?.toString?.() || undefined,
-  roadmap_item_id: raw?.roadmap_item_id?.toString?.() || raw?.item_id?.toString?.() || undefined,
-  title: raw?.title || raw?.name || 'Untitled task',
-  description: raw?.description ?? null,
-  task_type: raw?.task_type || raw?.type || null,
-  due_at: raw?.due_at ?? null,
-  max_attempts: asNumber(raw?.max_attempts) ?? 1,
-  attempt_scoring_rule: raw?.attempt_scoring_rule || 'latest',
-  allow_late_submission: typeof raw?.allow_late_submission === 'boolean' ? raw.allow_late_submission : null,
-  late_penalty_percent: asNumber(raw?.late_penalty_percent),
-  max_score: asNumber(raw?.max_score),
-  weight: asNumber(raw?.weight),
-  order_index: asNumber(raw?.order_index),
-  is_required: typeof raw?.is_required === 'boolean' ? raw.is_required : null,
-  is_active: typeof raw?.is_active === 'boolean' ? raw.is_active : true,
-  results: asArray<any>(raw?.results).map(normalizeTaskResult),
-  latest_result: raw?.latest_result ? normalizeTaskResult(raw.latest_result) : null,
-  result_summary: raw?.result_summary ? normalizeTaskResult(raw.result_summary) : null,
-});
-
-const normalizeProgress = (raw: any): EnrollmentRoadmapProgress => ({
-  id: raw?.id?.toString?.() || undefined,
-  enrollment_id: raw?.enrollment_id?.toString?.() || undefined,
-  roadmap_item_id: raw?.roadmap_item_id?.toString?.() || raw?.item_id?.toString?.() || undefined,
-  status: raw?.status,
-  completion_percent: asNumber(raw?.completion_percent),
-  total_score: asNumber(raw?.total_score),
-  max_total_score: asNumber(raw?.max_total_score),
-  avg_score: asNumber(raw?.avg_score),
-  best_score: asNumber(raw?.best_score),
-  submitted_at: raw?.submitted_at ?? null,
-  completed_at: raw?.completed_at ?? null,
-  updated_at: raw?.updated_at,
-});
-
-const normalizeRoadmapItem = (raw: any): RoadmapItem => ({
-  id: raw?.id?.toString?.() || raw?.item_id?.toString?.() || undefined,
-  course_offering_id: raw?.course_offering_id?.toString?.() || raw?.offering_id?.toString?.() || undefined,
-  title: raw?.title || raw?.name || 'Untitled roadmap item',
-  description: raw?.description ?? null,
-  week_no: asNumber(raw?.week_no),
-  estimated_hours: asNumber(raw?.estimated_hours),
-  status: raw?.status,
-  order_index: asNumber(raw?.order_index),
-  assessment_task_count: asNumber(raw?.assessment_task_count),
-  is_active: typeof raw?.is_active === 'boolean' ? raw.is_active : true,
-  tasks: asArray<any>(raw?.tasks).map(normalizeTask),
-  progress: raw?.progress ? normalizeProgress(raw.progress) : null,
-});
-
-const parseRoadmapResponse = (raw: any): RoadmapResponse => {
-  const items = asArray<any>(raw?.items || raw?.roadmap_items).map(normalizeRoadmapItem);
-  const progressRows = asArray<any>(raw?.progress || raw?.roadmap_progress).map(normalizeProgress);
-
-  const progressByItem = new Map<string, EnrollmentRoadmapProgress>();
-  for (const row of progressRows) {
-    if (row.roadmap_item_id) progressByItem.set(row.roadmap_item_id, row);
-  }
-
-  const enrichedItems = items.map((item) => {
-    if (item.id && !item.progress) {
-      return {
-        ...item,
-        progress: progressByItem.get(item.id) || null,
-      };
-    }
-    return item;
-  });
-
-  return {
-    enrollment_id: raw?.enrollment_id?.toString?.() || undefined,
-    offering_id: raw?.offering_id?.toString?.() || undefined,
-    course_code: raw?.course_code,
-    items: enrichedItems,
-    roadmap_items: enrichedItems,
-    progress: progressRows,
-    roadmap_progress: progressRows,
-    task_results: asArray<any>(raw?.task_results).map(normalizeTaskResult),
-    summary: raw?.summary || null,
-  };
-};
-
 const normalizeOffering = (raw: any): OfferingOption | null => {
   const id = raw?.id?.toString?.();
   const courseCode = raw?.course_code || raw?.course?.course_code;
@@ -252,14 +142,7 @@ const pickAttemptNo = (response: any): number | null => {
   return null;
 };
 
-const sortTasks = (tasks: AssessmentTask[]) => {
-  return [...tasks].sort((a, b) => {
-    const left = a.order_index ?? Number.MAX_SAFE_INTEGER;
-    const right = b.order_index ?? Number.MAX_SAFE_INTEGER;
-    if (left === right) return String(a.title || '').localeCompare(String(b.title || ''));
-    return left - right;
-  });
-};
+const sortTasks = (tasks: AssessmentTask[]) => sortAssessmentTasks(tasks);
 
 export default function TopToolsDrawer({
   open,
@@ -288,6 +171,7 @@ export default function TopToolsDrawer({
   const [progressSummary, setProgressSummary] = useState<Record<string, unknown> | null>(null);
   const [gamification, setGamification] = useState<GamificationOverview | null>(null);
   const [leaderboard, setLeaderboard] = useState<OfferingLeaderboard | null>(null);
+  const [studentProgressLoadedFor, setStudentProgressLoadedFor] = useState<string | null>(null);
   const [expandedItems, setExpandedItems] = useState<Record<string, boolean>>({});
   const [attemptFeedback, setAttemptFeedback] = useState<string | null>(null);
   const [latestAttemptByTask, setLatestAttemptByTask] = useState<Record<string, number>>({});
@@ -296,6 +180,7 @@ export default function TopToolsDrawer({
   const [submitEvidenceUrl, setSubmitEvidenceUrl] = useState('');
   const [submitArtifactUrl, setSubmitArtifactUrl] = useState('');
   const [submitReflectionText, setSubmitReflectionText] = useState('');
+  const [submitSubmissionText, setSubmitSubmissionText] = useState('');
   const [submitPayload, setSubmitPayload] = useState('');
   const [submittingAttempt, setSubmittingAttempt] = useState(false);
 
@@ -393,7 +278,7 @@ export default function TopToolsDrawer({
     setSurfaceMode('student');
   }, [canUseLecturerTools, open]);
 
-  const loadStudentData = async () => {
+  const loadStudentRoadmapData = async () => {
     if (!token || !resolvedStudentEnrollment?.enrollmentId) return;
     setStudentLoading(true);
     setStudentError(null);
@@ -412,57 +297,78 @@ export default function TopToolsDrawer({
             ...(task.latest_result ? [task.latest_result] : []),
             ...(task.result_summary ? [task.result_summary] : []),
           ];
-          const maxAttempt = resultCandidates
+          const maxAttemptFromResults = resultCandidates
             .map((result) => result.attempt_no || 0)
             .reduce((max, current) => (current > max ? current : max), 0);
+          const maxAttempt = Math.max(maxAttemptFromResults, task.attempts_count || 0);
           if (task.id && maxAttempt > 0) {
             attempts[task.id] = maxAttempt;
           }
         }
       }
       setLatestAttemptByTask((prev) => ({ ...prev, ...attempts }));
-
-      try {
-        const summary = await progressApi.getProgressSummary(token, resolvedStudentEnrollment.enrollmentId);
-        setProgressSummary(summary || null);
-      } catch {
-        setProgressSummary(null);
-      }
-
-      try {
-        const game = await progressApi.getGamification(token, resolvedStudentEnrollment.enrollmentId);
-        setGamification(game || null);
-      } catch {
-        setGamification(null);
-      }
-
-      try {
-        const board = await progressApi.getLeaderboard(token, resolvedStudentEnrollment.enrollmentId, 10);
-        setLeaderboard(board || null);
-      } catch {
-        setLeaderboard(null);
-      }
     } catch (error: any) {
       setStudentError(error?.message || 'Failed to load roadmap tools.');
       setRoadmapData(null);
-      setProgressSummary(null);
-      setGamification(null);
-      setLeaderboard(null);
     } finally {
       setStudentLoading(false);
     }
+  };
+
+  const loadStudentProgressData = async () => {
+    if (!token || !resolvedStudentEnrollment?.enrollmentId) return;
+
+    try {
+      const summary = await progressApi.getProgressSummary(token, resolvedStudentEnrollment.enrollmentId);
+      setProgressSummary(summary || null);
+    } catch {
+      setProgressSummary(null);
+    }
+
+    try {
+      const game = await progressApi.getGamification(token, resolvedStudentEnrollment.enrollmentId);
+      setGamification(game || null);
+    } catch {
+      setGamification(null);
+    }
+
+    try {
+      const board = await progressApi.getLeaderboard(token, resolvedStudentEnrollment.enrollmentId, 10);
+      setLeaderboard(board || null);
+    } catch {
+      setLeaderboard(null);
+    }
+
+    setStudentProgressLoadedFor(resolvedStudentEnrollment.enrollmentId);
   };
 
   useEffect(() => {
     if (!open || surfaceMode !== 'student' || !canUseStudentTools) return;
     if (!resolvedStudentEnrollment?.enrollmentId) {
       setRoadmapData(null);
+      setProgressSummary(null);
+      setGamification(null);
+      setLeaderboard(null);
+      setStudentProgressLoadedFor(null);
       return;
     }
 
-    loadStudentData();
+    setProgressSummary(null);
+    setGamification(null);
+    setLeaderboard(null);
+    setStudentProgressLoadedFor(null);
+    loadStudentRoadmapData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, surfaceMode, canUseStudentTools, resolvedStudentEnrollment?.enrollmentId, studentTab]);
+  }, [open, surfaceMode, canUseStudentTools, resolvedStudentEnrollment?.enrollmentId]);
+
+  useEffect(() => {
+    if (!open || surfaceMode !== 'student' || !canUseStudentTools) return;
+    if (studentTab !== 'progress') return;
+    if (!resolvedStudentEnrollment?.enrollmentId) return;
+    if (studentProgressLoadedFor === resolvedStudentEnrollment.enrollmentId) return;
+    loadStudentProgressData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, surfaceMode, canUseStudentTools, studentTab, resolvedStudentEnrollment?.enrollmentId, studentProgressLoadedFor]);
 
   const loadOfferings = async () => {
     if (!token || !canUseLecturerTools) return;
@@ -678,7 +584,11 @@ export default function TopToolsDrawer({
     try {
       setAttemptFeedback(null);
       await progressApi.startItem(token, resolvedStudentEnrollment.enrollmentId, itemId);
-      await loadStudentData();
+      await loadStudentRoadmapData();
+      setStudentProgressLoadedFor(null);
+      if (studentTab === 'progress') {
+        await loadStudentProgressData();
+      }
     } catch (error: any) {
       setAttemptFeedback(error?.message || 'Failed to start roadmap item.');
     }
@@ -698,7 +608,11 @@ export default function TopToolsDrawer({
       } else {
         setAttemptFeedback('Attempt created.');
       }
-      await loadStudentData();
+      await loadStudentRoadmapData();
+      setStudentProgressLoadedFor(null);
+      if (studentTab === 'progress') {
+        await loadStudentProgressData();
+      }
     } catch (error: any) {
       setAttemptFeedback(error?.message || 'Could not create attempt.');
     } finally {
@@ -711,7 +625,7 @@ export default function TopToolsDrawer({
 
     const attemptsFromResults = (task.results || []).map((result) => result.attempt_no || 0);
     const maxFromResults = attemptsFromResults.reduce((max, current) => (current > max ? current : max), 0);
-    const attemptNo = latestAttemptByTask[task.id] || maxFromResults;
+    const attemptNo = latestAttemptByTask[task.id] || maxFromResults || task.attempts_count || task.selected_attempt_no || 0;
 
     if (!attemptNo) {
       setAttemptFeedback('Create an attempt first.');
@@ -722,6 +636,7 @@ export default function TopToolsDrawer({
     setSubmitEvidenceUrl('');
     setSubmitArtifactUrl('');
     setSubmitReflectionText('');
+    setSubmitSubmissionText('');
     setSubmitPayload('');
   };
 
@@ -752,13 +667,19 @@ export default function TopToolsDrawer({
           evidence_url: submitEvidenceUrl.trim() || undefined,
           artifact_url: submitArtifactUrl.trim() || undefined,
           reflection_text: submitReflectionText.trim() || undefined,
+          submission_text: submitSubmissionText.trim() || undefined,
           payload: parsedPayload,
         }
       );
 
       setSubmitDraft(null);
       setAttemptFeedback(`Attempt ${submitDraft.attemptNo} submitted.`);
-      await loadStudentData();
+      setSubmitSubmissionText('');
+      await loadStudentRoadmapData();
+      setStudentProgressLoadedFor(null);
+      if (studentTab === 'progress') {
+        await loadStudentProgressData();
+      }
     } catch (error: any) {
       setAttemptFeedback(error?.message || 'Failed to submit attempt.');
     } finally {
@@ -1350,7 +1271,7 @@ export default function TopToolsDrawer({
                                   <div className="mt-3 space-y-3">
                                     {tasks.map((task) => {
                                       const resultList = task.results || [];
-                                      const attemptsUsed = resultList.length;
+                                      const attemptsUsed = task.attempts_count ?? resultList.length;
                                       const maxAttempts = task.max_attempts || 1;
                                       const latestResult =
                                         [...resultList].sort((a, b) => (b.attempt_no || 0) - (a.attempt_no || 0))[0] || task.latest_result || task.result_summary;
@@ -2327,6 +2248,17 @@ export default function TopToolsDrawer({
                   onChange={(event) => setSubmitReflectionText(event.target.value)}
                   rows={3}
                   placeholder="Explain your approach, choices, and what you learned."
+                  className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">Submission text</label>
+                <textarea
+                  value={submitSubmissionText}
+                  onChange={(event) => setSubmitSubmissionText(event.target.value)}
+                  rows={5}
+                  placeholder="Paste your answer, report, or written submission here for lecturer and AI review."
                   className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
                 />
               </div>

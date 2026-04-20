@@ -1,5 +1,6 @@
 // src/state/courseStore.ts
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 
 interface CourseStore {
   courseCode: string | null;
@@ -13,20 +14,27 @@ interface CourseStore {
   clearCourse: () => void;
 }
 
-export const useCourseStore = create<CourseStore>((set) => ({
-  courseCode: null,
-  courseName: null,
-  campus: null,
-  faculty: null,
-  department: null,
-  
-  setCourse: (code, name) => set({ courseCode: code, courseName: name }),
-  setHierarchy: (campus, faculty, department) => set({ campus, faculty, department }),
-  clearCourse: () => set({
-    courseCode: null,
-    courseName: null,
-    campus: null,
-    faculty: null,
-    department: null,
-  }),
-}));
+export const useCourseStore = create<CourseStore>()(
+  persist(
+    (set) => ({
+      courseCode: null,
+      courseName: null,
+      campus: null,
+      faculty: null,
+      department: null,
+
+      setCourse: (code, name) => set({ courseCode: code, courseName: name }),
+      setHierarchy: (campus, faculty, department) => set({ campus, faculty, department }),
+      clearCourse: () => set({
+        courseCode: null,
+        courseName: null,
+        campus: null,
+        faculty: null,
+        department: null,
+      }),
+    }),
+    {
+      name: 'edusmart-course-context-v1',
+    }
+  )
+);

@@ -2,16 +2,19 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCourseStore } from '../state/courseStore';
-import { setupApi } from '../services/api';
+import { useAuth } from '../state/AuthContext';
+import { enrollmentApi, setupApi } from '../services/api';
 import { InstitutionConfig } from '../types/institution';
 
 export default function CourseSelectionPage() {
   const navigate = useNavigate();
   const { setCourse, setHierarchy } = useCourseStore();
+  const { user, token } = useAuth();
 
   const [config, setConfig] = useState<InstitutionConfig | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [enrolledCourses, setEnrolledCourses] = useState<Array<{ code: string; name: string }>>([]);
 
   const [selectedCampus, setSelectedCampus] = useState<string>('');
   const [selectedFaculty, setSelectedFaculty] = useState<string>('');
@@ -83,8 +86,35 @@ export default function CourseSelectionPage() {
             ],
           };
         }
-        
+
         setConfig(configData);
+
+        if (user?.role === 'student' && token) {
+          try {
+            const response = await enrollmentApi.list(token, { user_id: user.id, status: 'active' });
+            const rows = Array.isArray(response)
+              ? response
+              : response?.items || response?.results || response?.enrollments || [];
+            const byCode = new Map<string, { code: string; name: string }>();
+
+            for (const row of rows) {
+              const code = row?.offering?.course_code;
+              if (!code || byCode.has(code)) continue;
+              byCode.set(code, {
+                code,
+                name: row?.offering?.course?.course_name || code,
+              });
+            }
+
+            setEnrolledCourses(Array.from(byCode.values()));
+          } catch (enrollmentError) {
+            console.warn('Could not load active enrollments for course selection', enrollmentError);
+            setEnrolledCourses([]);
+          }
+        } else {
+          setEnrolledCourses([]);
+        }
+
         setIsLoading(false);
       } catch (err: any) {
         setError(err.message || 'Failed to load course information');
@@ -93,7 +123,12 @@ export default function CourseSelectionPage() {
     };
 
     fetchConfig();
-  }, []);
+  }, [token, user?.id, user?.role]);
+
+  const handleSelectEnrolledCourse = (code: string, name: string) => {
+    setCourse(code, name);
+    navigate('/chat');
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -152,6 +187,31 @@ export default function CourseSelectionPage() {
           <p className="text-gray-600 mb-8">
             Select your course to access personalized AI tutoring
           </p>
+
+          {enrolledCourses.length > 0 && (
+            <div className="mb-8 rounded-2xl border border-blue-100 bg-blue-50 p-5">
+              <h2 className="text-lg font-semibold text-blue-900">Your active courses</h2>
+              <p className="mt-1 text-sm text-blue-800">
+                Choose one of your current enrollments to open the student workspace with the right roadmap and assessments.
+              </p>
+              <div className="mt-4 space-y-3">
+                {enrolledCourses.map((course) => (
+                  <button
+                    key={course.code}
+                    type="button"
+                    onClick={() => handleSelectEnrolledCourse(course.code, course.name)}
+                    className="w-full rounded-xl border border-blue-200 bg-white px-4 py-3 text-left transition hover:border-blue-400 hover:bg-blue-100/60"
+                  >
+                    <div className="font-semibold text-gray-900">{course.code}</div>
+                    <div className="text-sm text-gray-600">{course.name}</div>
+                  </button>
+                ))}
+              </div>
+              <p className="mt-4 text-xs text-blue-700">
+                Need a different course? You can still use the catalog flow below.
+              </p>
+            </div>
+          )}
 
           {error && (
             <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
