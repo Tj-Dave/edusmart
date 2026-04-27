@@ -33,6 +33,8 @@ def create_course(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="Only admins can create course definitions")
     try:
         return crud_courses.create_course(
             db,
@@ -70,13 +72,11 @@ def create_offering(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Optional but recommended: only lecturers/admin create offerings
-    if current_user.role not in {UserRole.lecturer, UserRole.admin}:
-        raise HTTPException(status_code=403, detail="Only lecturers/admin can create course offerings")
+    if current_user.role != UserRole.lecturer:
+        raise HTTPException(status_code=403, detail="Only lecturers can create course offerings")
 
-    # Optional: prevent lecturer from creating offerings for someone else unless admin
     lecturer_id = payload.lecturer_user_id
-    if lecturer_id and str(lecturer_id) != str(current_user.id) and current_user.role != UserRole.admin:
+    if lecturer_id and str(lecturer_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Lecturers can only assign themselves as lecturer_user_id")
 
     try:
@@ -131,9 +131,8 @@ def set_offering_active(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Optional but recommended
-    if current_user.role not in {UserRole.lecturer, UserRole.admin}:
-        raise HTTPException(status_code=403, detail="Only lecturers/admin can update offerings")
+    if current_user.role != UserRole.lecturer:
+        raise HTTPException(status_code=403, detail="Only lecturers can update offerings")
 
     try:
         return crud_courses.set_offering_active(db, offering_id=offering_id, is_active=is_active)
@@ -148,18 +147,14 @@ def update_offering(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in {UserRole.lecturer, UserRole.admin}:
-        raise HTTPException(status_code=403, detail="Only lecturers/admin can update offerings")
+    if current_user.role != UserRole.lecturer:
+        raise HTTPException(status_code=403, detail="Only lecturers can update offerings")
 
     existing = crud_courses.get_offering(db, offering_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Offering not found")
 
-    if (
-        current_user.role == UserRole.lecturer
-        and existing.lecturer_user_id
-        and str(existing.lecturer_user_id) != str(current_user.id)
-    ):
+    if existing.lecturer_user_id and str(existing.lecturer_user_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Lecturers can only update their own offerings")
 
     try:
@@ -179,8 +174,8 @@ def set_offering_enrollment_key(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in {UserRole.lecturer, UserRole.admin}:
-        raise HTTPException(status_code=403, detail="Only lecturers/admin can set enrollment keys")
+    if current_user.role != UserRole.lecturer:
+        raise HTTPException(status_code=403, detail="Only lecturers can set enrollment keys")
 
     try:
         return crud_courses.set_offering_enrollment_key(
@@ -200,18 +195,14 @@ def delete_offering(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in {UserRole.lecturer, UserRole.admin}:
-        raise HTTPException(status_code=403, detail="Only lecturers/admin can delete offerings")
+    if current_user.role != UserRole.lecturer:
+        raise HTTPException(status_code=403, detail="Only lecturers can delete offerings")
 
     existing = crud_courses.get_offering(db, offering_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Offering not found")
 
-    if (
-        current_user.role == UserRole.lecturer
-        and existing.lecturer_user_id
-        and str(existing.lecturer_user_id) != str(current_user.id)
-    ):
+    if existing.lecturer_user_id and str(existing.lecturer_user_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Lecturers can only delete their own offerings")
 
     try:
@@ -240,6 +231,8 @@ def update_course(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="Only admins can update course definitions")
     try:
         return crud_courses.update_course(
             db,

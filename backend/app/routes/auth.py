@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.db.postgres import get_db
-from app.db.models import User, UserProfile, UserRole, AuthProvider
+from app.db.models import AuthProvider, InstitutionSettings, User, UserProfile, UserRole
 from app.services.auth.security import hash_password, verify_password, create_access_token
 from app.services.auth.deps import get_current_user
 
@@ -86,9 +86,49 @@ def _user_to_out(u: User) -> UserOut:
     )
 
 
+def _to_policy_entries(raw: object) -> set[str]:
+    if not isinstance(raw, list):
+        return set()
+    return {str(item).strip().lower() for item in raw if str(item).strip()}
+
+
+def _policy_entry_matches_email(entry: str, *, email: str, domain: str) -> bool:
+    if "@" in entry:
+        return email == entry
+    return domain == entry
+
+
+def _enforce_registration_email_policy(db: Session, email: str) -> None:
+    settings_row = (
+        db.execute(select(InstitutionSettings).where(InstitutionSettings.id == 1)).scalar_one_or_none()
+    )
+    if not settings_row:
+        return
+
+    normalized_email = email.strip().lower()
+    domain = normalized_email.split("@")[-1]
+
+    allowed_domains = _to_policy_entries(settings_row.allowed_email_domains)
+    whitelist = _to_policy_entries(settings_row.email_whitelist_json)
+    blacklist = _to_policy_entries(settings_row.email_blacklist_json)
+    policy_mode = (settings_row.email_policy_mode or "none").strip().lower()
+
+    if any(_policy_entry_matches_email(entry, email=normalized_email, domain=domain) for entry in blacklist):
+        raise HTTPException(status_code=400, detail="Registration email is blocked by institutional policy")
+
+    if allowed_domains and domain not in allowed_domains:
+        raise HTTPException(status_code=400, detail="Email domain is not allowed for registration")
+
+    if policy_mode == "allowlist" and whitelist:
+        if not any(_policy_entry_matches_email(entry, email=normalized_email, domain=domain) for entry in whitelist):
+            raise HTTPException(status_code=400, detail="Email is not on the institutional allowlist")
+
+
 # ---------- Endpoints ----------
 @router.post("/register", response_model=UserOut)
 def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+    _enforce_registration_email_policy(db, str(payload.email))
+
     # check email uniqueness
     existing = db.execute(select(User).where(User.email == payload.email)).scalar_one_or_none()
     if existing:

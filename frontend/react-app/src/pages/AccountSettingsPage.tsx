@@ -12,7 +12,7 @@ interface AccountSettings {
 export default function AccountSettingsPage() {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
-  const backPath = user?.role === 'lecturer' ? '/lecturer' : '/chat';
+  const backPath = user?.role === 'admin' ? '/admin/dashboard' : user?.role === 'lecturer' ? '/lecturer' : '/chat';
   const [settings, setSettings] = useState<AccountSettings>({
     username: user?.username || '',
     description: '',

@@ -1,15 +1,17 @@
 // src/types/auth.ts
+export type UserRole = 'student' | 'lecturer' | 'admin' | 'teaching_assistant' | 'department_head';
+
 export interface User {
   id: string;
   username: string;
   email: string;
-  role: 'student' | 'lecturer' | 'admin';
+  role: UserRole;
   full_name?: string;
   department?: string;
   faculty?: string;
   program?: string;
-  approved: boolean;
-  is_active: boolean;
+  approved?: boolean;
+  is_active?: boolean;
   courses?: string;
 }
 

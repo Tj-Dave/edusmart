@@ -34,3 +34,19 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="User not found or inactive")
 
     return user
+
+
+def _role_value(user: User) -> str:
+    return user.role.value if hasattr(user.role, "value") else str(user.role)
+
+
+def require_current_user_roles(*allowed_roles: str):
+    allowed = {role.strip() for role in allowed_roles if role and role.strip()}
+
+    def _require_role(current_user: User = Depends(get_current_user)) -> User:
+        role = _role_value(current_user)
+        if role not in allowed:
+            raise HTTPException(status_code=403, detail="Insufficient role permissions")
+        return current_user
+
+    return _require_role

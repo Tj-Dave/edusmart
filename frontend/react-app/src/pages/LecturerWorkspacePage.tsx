@@ -887,7 +887,7 @@ export default function LecturerWorkspacePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedOfferingId]);
 
-  const isLecturerSurface = user?.role === 'lecturer' || user?.role === 'admin';
+  const isLecturerSurface = user?.role === 'lecturer';
 
   useEffect(() => {
     if (!user) {

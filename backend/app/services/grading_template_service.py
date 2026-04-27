@@ -13,7 +13,7 @@ from app.db.models import (
     GradingTemplateVersion,
     User,
 )
-from app.services.access_control import is_admin, is_lecturer, require_role
+from app.services.access_control import is_lecturer, require_role
 from app.services.domain_errors import ServiceNotFoundError, ServicePermissionError
 from app.services.grading_scheme_service import normalize_grading_scheme_payload
 
@@ -125,10 +125,8 @@ def get_template_version_for_actor(
 
 
 def _require_template_access(template: GradingTemplate, actor: User) -> None:
-    if is_admin(actor):
-        return
     if not is_lecturer(actor):
-        raise ServicePermissionError("Only lecturers/admin can access grading templates")
+        raise ServicePermissionError("Only lecturers can access grading templates")
     if str(template.owner_user_id) != str(actor.id):
         raise ServicePermissionError("You can only access your own grading templates")
 
@@ -194,7 +192,7 @@ def create_template(
     actor: User,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    require_role(actor, allowed={"lecturer", "admin"})
+    require_role(actor, allowed={"lecturer"})
     template = GradingTemplate(
         owner_user_id=actor.id,
         name=payload["name"],
@@ -214,10 +212,9 @@ def list_templates(
     *,
     actor: User,
 ) -> list[dict[str, Any]]:
-    require_role(actor, allowed={"lecturer", "admin"})
+    require_role(actor, allowed={"lecturer"})
     query = _template_query(db)
-    if not is_admin(actor):
-        query = query.filter(GradingTemplate.owner_user_id == actor.id)
+    query = query.filter(GradingTemplate.owner_user_id == actor.id)
     templates = query.order_by(GradingTemplate.updated_at.desc()).all()
     return [serialize_template(template) for template in templates]
 

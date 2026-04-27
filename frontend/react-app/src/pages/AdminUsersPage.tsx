@@ -1,457 +1,506 @@
-// src/pages/AdminUsersPage.tsx
-import React, { useState, useEffect } from 'react';
-import { useAuth } from '../state/AuthContext';
-import { useNavigate } from 'react-router-dom';
-import { adminApi } from '../services/api';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
+import AdminLayout from '../components/admin/AdminLayout';
+import { AdminRole, AdminUser, adminApi } from '../services/api';
 
-interface User {
+const roleOptions: AdminRole[] = [
+  'lecturer',
+  'student',
+  'teaching_assistant',
+  'department_head',
+  'admin',
+];
+
+const roleLabel: Record<AdminRole, string> = {
+  admin: 'Admin',
+  lecturer: 'Lecturer',
+  student: 'Student',
+  teaching_assistant: 'Teaching Assistant',
+  department_head: 'Department Head',
+};
+
+interface CreateFormState {
+  username: string;
   email: string;
+  password: string;
+  role: AdminRole;
   full_name: string;
-  role: 'student' | 'lecturer' | 'admin';
-  approved: boolean;
-  is_active: boolean;
-  courses?: string;
+  university_id: string;
+  department: string;
+  faculty: string;
+  program: string;
+  year_of_study: string;
+  phone: string;
 }
 
+const emptyCreateForm: CreateFormState = {
+  username: '',
+  email: '',
+  password: '',
+  role: 'lecturer',
+  full_name: '',
+  university_id: '',
+  department: '',
+  faculty: '',
+  program: '',
+  year_of_study: '',
+  phone: '',
+};
+
 export default function AdminUsersPage() {
-  const { user: currentUser, logout } = useAuth();
-  const navigate = useNavigate();
   const token = localStorage.getItem('auth_token') || '';
-
-  const [users, setUsers] = useState<User[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [query, setQuery] = useState('');
+  const [roleFilter, setRoleFilter] = useState<AdminRole | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [createLoading, setCreateLoading] = useState(false);
+  const [form, setForm] = useState<CreateFormState>(emptyCreateForm);
+  const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
+  const [editForm, setEditForm] = useState<Partial<CreateFormState>>({});
+  const [updating, setUpdating] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
-  const [formData, setFormData] = useState({
-    username: '',
-    email: '',
-    full_name: '',
-    password: '',
-    phone: '',
-    university_id: '',
-    faculty: '',
-    department: '',
-    program: '',
-    year_of_study: '',
-    role: 'student' as 'student' | 'lecturer',
-  });
+  const loadUsers = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await adminApi.getUsers(token, {
+        role: roleFilter === 'all' ? undefined : roleFilter,
+        is_active: statusFilter === 'all' ? undefined : statusFilter === 'active',
+        q: query.trim() || undefined,
+        limit: 500,
+      });
+      setUsers(response);
+    } catch (requestError: any) {
+      setError(requestError?.message || 'Failed to load users.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  // Fetch users on mount
   useEffect(() => {
-    fetchUsers();
+    void loadUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const fetchUsers = async () => {
+  const summary = useMemo(() => {
+    const total = users.length;
+    const active = users.filter((row) => row.is_active).length;
+    const lecturers = users.filter((row) => row.role === 'lecturer').length;
+    const students = users.filter((row) => row.role === 'student').length;
+    return { total, active, lecturers, students };
+  }, [users]);
+
+  const handleSearch = async (event: FormEvent) => {
+    event.preventDefault();
+    await loadUsers();
+  };
+
+  const handleCreateUser = async (event: FormEvent) => {
+    event.preventDefault();
     try {
-      setIsLoading(true);
-      const data = await adminApi.getUsers(token);
-      setUsers(data);
-      setError(null);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load users');
+      setCreating(true);
+      setCreateError(null);
+      await adminApi.createUser(token, {
+        username: form.username.trim(),
+        email: form.email.trim() || undefined,
+        password: form.password,
+        role: form.role,
+        full_name: form.full_name.trim() || undefined,
+        university_id: form.university_id.trim() || undefined,
+        department: form.department.trim() || undefined,
+        faculty: form.faculty.trim() || undefined,
+        program: form.program.trim() || undefined,
+        year_of_study: form.year_of_study ? Number(form.year_of_study) : undefined,
+        phone: form.phone.trim() || undefined,
+      });
+      setForm(emptyCreateForm);
+      setShowCreate(false);
+      await loadUsers();
+    } catch (requestError: any) {
+      setCreateError(requestError?.message || 'Failed to create user.');
     } finally {
-      setIsLoading(false);
+      setCreating(false);
     }
   };
 
-  const handleCreateUser = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setCreateError(null);
-    setCreateLoading(true);
+  const handleUpdateUser = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!editingUser) return;
 
     try {
-      if (!currentUser?.id) {
-        throw new Error('Admin user ID not found');
-      }
+      setUpdating(true);
+      setEditError(null);
 
-      // Validate required fields based on role
-      if (!formData.username || !formData.email || !formData.full_name || !formData.password || !formData.phone) {
-        throw new Error('Username, Email, Full Name, Password, and Phone are required');
-      }
-
-      if (formData.role === 'student') {
-        if (!formData.faculty || !formData.department) {
-          throw new Error('Faculty and Department are required for students');
-        }
-      } else if (formData.role === 'lecturer') {
-        if (!formData.department) {
-          throw new Error('Department is required for lecturers');
-        }
-      }
-
-      await adminApi.createUser(token, currentUser.id, {
-        username: formData.username,
-        email: formData.email,
-        full_name: formData.full_name,
-        role: formData.role,
-        password: formData.password,
-        phone: formData.phone,
-        university_id: formData.university_id || undefined,
-        faculty: formData.role === 'student' ? formData.faculty : undefined,
-        department: formData.department || undefined,
-        program: formData.role === 'student' ? formData.program : undefined,
-        year_of_study: formData.role === 'student' && formData.year_of_study ? parseInt(formData.year_of_study) : undefined,
+      await adminApi.updateUser(token, editingUser.id, {
+        email: editForm.email?.trim() || undefined,
+        role: editForm.role as AdminRole,
+        full_name: editForm.full_name?.trim() || undefined,
+        university_id: editForm.university_id?.trim() || undefined,
+        department: editForm.department?.trim() || undefined,
+        faculty: editForm.faculty?.trim() || undefined,
+        program: editForm.program?.trim() || undefined,
+        year_of_study: editForm.year_of_study ? Number(editForm.year_of_study) : undefined,
+        phone: editForm.phone?.trim() || undefined,
       });
 
-      // Reset form and refresh users
-      setFormData({
-        username: '',
-        email: '',
-        full_name: '',
-        password: '',
-        phone: '',
-        university_id: '',
-        faculty: '',
-        department: '',
-        program: '',
-        year_of_study: '',
-        role: 'student',
-      });
-      setShowCreateForm(false);
-      await fetchUsers();
+      setEditingUser(null);
+      setEditForm({});
+      await loadUsers();
     } catch (err: any) {
-      setCreateError(err.message || 'Failed to create user');
+      setEditError(err?.message || 'Failed to update user');
     } finally {
-      setCreateLoading(false);
+      setUpdating(false);
     }
   };
 
-  const handleLogout = () => {
-    logout();
-    navigate('/credentials-login');
+  const openEditUser = (user: AdminUser) => {
+    setEditingUser(user);
+    setEditForm({
+      username: user.username,
+      email: user.email || '',
+      role: user.role,
+      full_name: user.profile?.full_name || '',
+      university_id: user.profile?.university_id || '',
+      department: user.profile?.department || '',
+      faculty: user.profile?.faculty || '',
+      program: user.profile?.program || '',
+      year_of_study: user.profile?.year_of_study?.toString() || '',
+      phone: user.profile?.phone || '',
+    });
+    setEditError(null);
+  };
+
+  const toggleUserStatus = async (user: AdminUser) => {
+    try {
+      if (user.is_active) {
+        await adminApi.deactivateUser(token, user.id);
+      } else {
+        await adminApi.activateUser(token, user.id);
+      }
+      await loadUsers();
+    } catch (requestError: any) {
+      setError(requestError?.message || 'Failed to update user status.');
+    }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-100 to-blue-50">
-      {/* Header with Navigation */}
-      <div className="bg-white shadow-lg sticky top-0 z-10">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-800">🎓 EduSmart Admin</h1>
-            <p className="text-gray-600 text-sm">{currentUser?.email}</p>
-          </div>
-          <button
-            onClick={handleLogout}
-            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
-          >
-            Logout
-          </button>
+    <AdminLayout
+      title="User Management"
+      subtitle="Govern lecturers, students, and role assignments at platform level."
+    >
+      <section className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Users</p>
+          <p className="mt-1 text-2xl font-semibold">{summary.total}</p>
         </div>
-      </div>
-
-      {/* Navigation Tabs */}
-      <div className="bg-white border-b border-gray-200">
-        <div className="max-w-6xl mx-auto px-6 flex gap-8">
-          <button
-            onClick={() => navigate('/admin/dashboard')}
-            className="px-4 py-4 border-b-2 font-medium transition border-transparent text-gray-600 hover:text-gray-800"
-          >
-            ← Back to Dashboard
-          </button>
+        <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Active</p>
+          <p className="mt-1 text-2xl font-semibold">{summary.active}</p>
         </div>
-      </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Lecturers</p>
+          <p className="mt-1 text-2xl font-semibold">{summary.lecturers}</p>
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Students</p>
+          <p className="mt-1 text-2xl font-semibold">{summary.students}</p>
+        </div>
+      </section>
 
-      <div className="max-w-6xl mx-auto p-4">
-        {/* Header */}
-        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-          <div className="flex justify-between items-start">
-            <div>
-              <h1 className="text-3xl font-bold text-gray-800 mb-2">User Management</h1>
-              <p className="text-gray-600">Create and manage student and lecturer accounts</p>
-            </div>
+      <section className="mb-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <form onSubmit={handleSearch} className="grid gap-3 md:grid-cols-4">
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search username, email, or full name"
+            className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+          />
+          <select
+            value={roleFilter}
+            onChange={(event) => setRoleFilter(event.target.value as AdminRole | 'all')}
+            className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+          >
+            <option value="all">All roles</option>
+            {roleOptions.map((role) => (
+              <option key={role} value={role}>
+                {roleLabel[role]}
+              </option>
+            ))}
+          </select>
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value as 'all' | 'active' | 'inactive')}
+            className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+          >
+            <option value="all">All status</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+          <div className="flex gap-2">
+            <button type="submit" className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white">
+              Apply
+            </button>
             <button
-              onClick={() => setShowCreateForm(!showCreateForm)}
-              className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+              type="button"
+              onClick={() => setShowCreate((previous) => !previous)}
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700"
             >
-              {showCreateForm ? 'Cancel' : '+ Create User'}
+              {showCreate ? 'Close Form' : 'Create User'}
             </button>
           </div>
-        </div>
+        </form>
+      </section>
 
-        {/* Create User Form */}
-        {showCreateForm && (
-          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-            <h2 className="text-2xl font-bold text-gray-800 mb-4">Create New User</h2>
+      {showCreate && (
+        <section className="mb-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h2 className="text-base font-semibold text-slate-900">Create User</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            TA and Department Head roles are provisioned now but have no elevated endpoint access in this release.
+          </p>
+          {createError && <div className="mt-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{createError}</div>}
+          <form onSubmit={handleCreateUser} className="mt-3 grid gap-3 md:grid-cols-3">
+            <input
+              required
+              value={form.username}
+              onChange={(event) => setForm((previous) => ({ ...previous, username: event.target.value }))}
+              placeholder="Username"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <input
+              type="email"
+              value={form.email}
+              onChange={(event) => setForm((previous) => ({ ...previous, email: event.target.value }))}
+              placeholder="Email (optional)"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <input
+              required
+              minLength={6}
+              type="password"
+              value={form.password}
+              onChange={(event) => setForm((previous) => ({ ...previous, password: event.target.value }))}
+              placeholder="Temporary password"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <select
+              value={form.role}
+              onChange={(event) => setForm((previous) => ({ ...previous, role: event.target.value as AdminRole }))}
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            >
+              {roleOptions.map((role) => (
+                <option key={role} value={role}>
+                  {roleLabel[role]}
+                </option>
+              ))}
+            </select>
+            <input
+              value={form.full_name}
+              onChange={(event) => setForm((previous) => ({ ...previous, full_name: event.target.value }))}
+              placeholder="Full name"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <input
+              value={form.phone}
+              onChange={(event) => setForm((previous) => ({ ...previous, phone: event.target.value }))}
+              placeholder="Phone"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <input
+              value={form.university_id}
+              onChange={(event) => setForm((previous) => ({ ...previous, university_id: event.target.value }))}
+              placeholder="University ID"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <input
+              value={form.faculty}
+              onChange={(event) => setForm((previous) => ({ ...previous, faculty: event.target.value }))}
+              placeholder="Faculty"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <input
+              value={form.department}
+              onChange={(event) => setForm((previous) => ({ ...previous, department: event.target.value }))}
+              placeholder="Department"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <input
+              value={form.program}
+              onChange={(event) => setForm((previous) => ({ ...previous, program: event.target.value }))}
+              placeholder="Program"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <input
+              value={form.year_of_study}
+              onChange={(event) => setForm((previous) => ({ ...previous, year_of_study: event.target.value }))}
+              placeholder="Year of study"
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <div className="md:col-span-3">
+              <button
+                type="submit"
+                disabled={creating}
+                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+              >
+                {creating ? 'Creating...' : 'Create User'}
+              </button>
+            </div>
+          </form>
+        </section>
+      )}
 
-            {createError && (
-              <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
-                {createError}
-              </div>
-            )}
-
-            <form onSubmit={handleCreateUser} className="space-y-6">
-              {/* Account Information */}
-              <div className="border-b border-gray-200 pb-4">
-                <h3 className="font-semibold text-gray-800 mb-4">Account Information</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Username <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.username}
-                      onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      required
-                      disabled={createLoading}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Email <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="email"
-                      value={formData.email}
-                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      required
-                      disabled={createLoading}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Password <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="password"
-                      value={formData.password}
-                      onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      required
-                      minLength={8}
-                      disabled={createLoading}
-                    />
-                    <p className="text-xs text-gray-500 mt-1">Minimum 8 characters</p>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Role <span className="text-red-500">*</span>
-                    </label>
-                    <select
-                      value={formData.role}
-                      onChange={(e) => setFormData({ ...formData, role: e.target.value as 'student' | 'lecturer' })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={createLoading}
-                    >
-                      <option value="student">Student</option>
-                      <option value="lecturer">Lecturer</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              {/* Personal Information */}
-              <div className="border-b border-gray-200 pb-4">
-                <h3 className="font-semibold text-gray-800 mb-4">Personal Information</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="col-span-2 md:col-span-1">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Full Name <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.full_name}
-                      onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      required
-                      disabled={createLoading}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Phone <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="tel"
-                      value={formData.phone}
-                      onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      required
-                      disabled={createLoading}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      University ID
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.university_id}
-                      onChange={(e) => setFormData({ ...formData, university_id: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      disabled={createLoading}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Academic Information */}
-              <div className="pb-4">
-                <h3 className="font-semibold text-gray-800 mb-4">Academic Information</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Department <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.department}
-                      onChange={(e) => setFormData({ ...formData, department: e.target.value })}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      required
-                      disabled={createLoading}
-                    />
-                  </div>
-
-                  {formData.role === 'student' && (
-                    <>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Faculty <span className="text-red-500">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          value={formData.faculty}
-                          onChange={(e) => setFormData({ ...formData, faculty: e.target.value })}
-                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          required={formData.role === 'student'}
-                          disabled={createLoading}
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Program
-                        </label>
-                        <input
-                          type="text"
-                          value={formData.program}
-                          onChange={(e) => setFormData({ ...formData, program: e.target.value })}
-                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          disabled={createLoading}
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Year of Study
-                        </label>
-                        <select
-                          value={formData.year_of_study}
-                          onChange={(e) => setFormData({ ...formData, year_of_study: e.target.value })}
-                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          disabled={createLoading}
-                        >
-                          <option value="">Select year</option>
-                          <option value="1">Year 1</option>
-                          <option value="2">Year 2</option>
-                          <option value="3">Year 3</option>
-                          <option value="4">Year 4</option>
-                          <option value="5">Year 5</option>
-                        </select>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <div className="pt-4 flex gap-3">
-                <button
-                  type="submit"
-                  disabled={createLoading}
-                  className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-                >
-                  {createLoading ? 'Creating...' : 'Create User'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowCreateForm(false)}
-                  className="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 font-medium"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
+      <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        {error && <div className="mb-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+        {loading ? (
+          <p className="text-sm text-slate-600">Loading users...</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+                  <th className="px-2 py-2">Username</th>
+                  <th className="px-2 py-2">Name</th>
+                  <th className="px-2 py-2">Email</th>
+                  <th className="px-2 py-2">Role</th>
+                  <th className="px-2 py-2">Status</th>
+                  <th className="px-2 py-2">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {users.map((row) => (
+                  <tr key={row.id} className="border-b border-slate-100">
+                    <td className="px-2 py-2 font-medium text-slate-900">{row.username}</td>
+                    <td className="px-2 py-2 text-slate-700">{row.profile?.full_name || '—'}</td>
+                    <td className="px-2 py-2 text-slate-700">{row.email || '—'}</td>
+                    <td className="px-2 py-2 text-slate-700">{roleLabel[row.role]}</td>
+                    <td className="px-2 py-2">
+                      <span
+                        className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${
+                          row.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'
+                        }`}
+                      >
+                        {row.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                    </td>
+                    
+                    <td className="px-2 py-2">
+                      <button
+                        onClick={() => openEditUser(row)}
+                        className="mr-2 rounded-md border border-blue-300 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => void toggleUserStatus(row)}
+                        className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                      >
+                        {row.is_active ? 'Suspend' : 'Activate'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
+        {editingUser && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+            <div className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-lg">
+              <h2 className="text-lg font-semibold">Edit User</h2>
 
-        {/* Users Table */}
-        <div className="bg-white rounded-lg shadow-lg overflow-hidden">
-          <div className="p-6 border-b border-gray-200">
-            <h2 className="text-2xl font-bold text-gray-800">Users</h2>
-          </div>
+              {editError && (
+                <div className="mt-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {editError}
+                </div>
+              )}
 
-          {error && (
-            <div className="p-6 bg-red-100 border-b border-red-400 text-red-700">
-              {error}
-            </div>
-          )}
+              <form onSubmit={handleUpdateUser} className="mt-4 grid gap-3 md:grid-cols-2">
+                <input
+                  value={editForm.username || ''}
+                  onChange={(e) => setEditForm((p) => ({ ...p, username: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm"
+                  placeholder="Username"
+                />
 
-          {isLoading ? (
-            <div className="p-6 text-center text-gray-500">Loading users...</div>
-          ) : users.length === 0 ? (
-            <div className="p-6 text-center text-gray-500">No users found</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-100 border-b border-gray-200">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Email</th>
-                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Name</th>
-                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Role</th>
-                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Status</th>
-                    <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Active</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.map((u) => (
-                    <tr key={u.email} className="border-b border-gray-200 hover:bg-gray-50">
-                      <td className="px-6 py-4 text-sm text-gray-700">{u.email}</td>
-                      <td className="px-6 py-4 text-sm text-gray-700">{u.full_name}</td>
-                      <td className="px-6 py-4 text-sm">
-                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                          u.role === 'admin'
-                            ? 'bg-red-100 text-red-800'
-                            : u.role === 'lecturer'
-                            ? 'bg-blue-100 text-blue-800'
-                            : 'bg-green-100 text-green-800'
-                        }`}>
-                          {u.role}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-sm">
-                        {u.approved ? (
-                          <span className="text-green-600 font-medium">✓ Approved</span>
-                        ) : (
-                          <span className="text-yellow-600 font-medium">⏳ Pending</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4 text-sm">
-                        {u.is_active ? (
-                          <span className="text-green-600 font-medium">✓ Active</span>
-                        ) : (
-                          <span className="text-gray-500 font-medium">✕ Inactive</span>
-                        )}
-                      </td>
-                    </tr>
+                <input
+                  value={editForm.email || ''}
+                  onChange={(e) => setEditForm((p) => ({ ...p, email: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm"
+                  placeholder="Email"
+                />
+
+                <select
+                  value={editForm.role || 'student'}
+                  onChange={(e) => setEditForm((p) => ({ ...p, role: e.target.value as AdminRole }))}
+                  className="rounded border px-3 py-2 text-sm"
+                >
+                  {roleOptions.map((role) => (
+                    <option key={role} value={role}>
+                      {roleLabel[role]}
+                    </option>
                   ))}
-                </tbody>
-              </table>
+                </select>
+
+                <input
+                  value={editForm.full_name || ''}
+                  onChange={(e) => setEditForm((p) => ({ ...p, full_name: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm"
+                  placeholder="Full Name"
+                />
+
+                <input
+                  value={editForm.department || ''}
+                  onChange={(e) => setEditForm((p) => ({ ...p, department: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm"
+                  placeholder="Department"
+                />
+
+                <input
+                  value={editForm.faculty || ''}
+                  onChange={(e) => setEditForm((p) => ({ ...p, faculty: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm"
+                  placeholder="Faculty"
+                />
+
+                <input
+                  value={editForm.program || ''}
+                  onChange={(e) => setEditForm((p) => ({ ...p, program: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm"
+                  placeholder="Program"
+                />
+
+                <input
+                  value={editForm.year_of_study || ''}
+                  onChange={(e) => setEditForm((p) => ({ ...p, year_of_study: e.target.value }))}
+                  className="rounded border px-3 py-2 text-sm"
+                  placeholder="Year of Study"
+                />
+
+                <div className="md:col-span-2 flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingUser(null)}
+                    className="rounded border px-4 py-2 text-sm"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={updating}
+                    className="rounded bg-blue-600 px-4 py-2 text-sm text-white"
+                  >
+                    {updating ? 'Updating...' : 'Save Changes'}
+                  </button>
+                </div>
+              </form>
             </div>
-          )}
-        </div>
-      </div>
-    </div>
+          </div>
+        )}
+      </section>
+    </AdminLayout>
   );
 }

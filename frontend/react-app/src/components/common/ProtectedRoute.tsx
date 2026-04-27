@@ -3,6 +3,7 @@ import { ReactNode } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../../state/AuthContext';
 import { useCourseStore } from '../../state/courseStore';
+import { UserRole } from '../../types/auth';
 
 // ==================== PublicRoute ====================
 export function PublicRoute({ children }: { children: ReactNode }) {
@@ -67,7 +68,7 @@ export function RoleRoute({
   allowedRoles,
   children,
 }: {
-  allowedRoles: Array<'student' | 'lecturer' | 'admin'>;
+  allowedRoles: UserRole[];
   children: ReactNode;
 }) {
   const { user, isLoading } = useAuth();

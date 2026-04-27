@@ -92,6 +92,8 @@ class UserRole(str, enum.Enum):
     student = "student"
     lecturer = "lecturer"
     admin = "admin"
+    teaching_assistant = "teaching_assistant"
+    department_head = "department_head"
 
 
 class AuthProvider(str, enum.Enum):
@@ -376,6 +378,86 @@ class UserProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="profile")
+
+
+# -----------------------------
+# institution governance
+# -----------------------------
+class InstitutionSettings(Base):
+    __tablename__ = "institution_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, server_default="1")
+    university_name: Mapped[str] = mapped_column(String(255), nullable=False, server_default="EduSmart Institution")
+    logo_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    academic_calendar_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    policy_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+
+    email_policy_mode: Mapped[str] = mapped_column(String(32), nullable=False, server_default="none")
+    allowed_email_domains: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    email_whitelist_json: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    email_blacklist_json: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+
+    rag_model_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    rag_embedding_strategy: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    rag_last_rebuild_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    rag_rebuild_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("length(trim(university_name)) > 0", name="institution_settings_name_not_empty"),
+        CheckConstraint(
+            "email_policy_mode IN ('none','allowlist','denylist')",
+            name="institution_settings_email_policy_mode_valid",
+        ),
+        CheckConstraint("jsonb_typeof(academic_calendar_json) = 'object'", name="institution_settings_calendar_object"),
+        CheckConstraint("jsonb_typeof(policy_json) = 'object'", name="institution_settings_policy_object"),
+    )
+
+
+class Faculty(Base):
+    __tablename__ = "faculties"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    departments: Mapped[List["Department"]] = relationship(
+        back_populates="faculty",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(trim(name)) > 0", name="faculties_name_not_empty"),
+    )
+
+
+class Department(Base):
+    __tablename__ = "departments"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    faculty_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("faculties.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    faculty: Mapped["Faculty"] = relationship(back_populates="departments")
+
+    __table_args__ = (
+        UniqueConstraint("faculty_id", "name", name="uq_departments_faculty_name"),
+        CheckConstraint("length(trim(name)) > 0", name="departments_name_not_empty"),
+    )
 
 
 # -----------------------------

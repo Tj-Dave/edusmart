@@ -123,51 +123,452 @@ export const authApi = {
 };
 
 // ==================== Admin Endpoints ====================
+export type AdminRole = 'admin' | 'lecturer' | 'student' | 'teaching_assistant' | 'department_head';
+
+export interface AdminUserProfile {
+  full_name?: string | null;
+  university_id?: string | null;
+  department?: string | null;
+  faculty?: string | null;
+  program?: string | null;
+  year_of_study?: number | null;
+  phone?: string | null;
+}
+
+export interface AdminUser {
+  id: string;
+  username: string;
+  email?: string | null;
+  role: AdminRole;
+  auth_provider: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  profile?: AdminUserProfile | null;
+}
+
+export interface AdminUserCreatePayload {
+  username: string;
+  email?: string;
+  password: string;
+  role: AdminRole;
+  full_name?: string;
+  university_id?: string;
+  department?: string;
+  faculty?: string;
+  program?: string;
+  year_of_study?: number;
+  phone?: string;
+}
+
+export interface AdminUserUpdatePayload {
+  email?: string;
+  role?: AdminRole;
+  is_active?: boolean;
+  full_name?: string;
+  university_id?: string;
+  department?: string;
+  faculty?: string;
+  program?: string;
+  year_of_study?: number;
+  phone?: string;
+}
+
+export interface AdminCourse {
+  course_code: string;
+  course_name: string;
+  description?: string | null;
+  department?: string | null;
+  faculty?: string | null;
+  level?: number | null;
+  credits?: number | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminCoursePayload {
+  course_code: string;
+  course_name: string;
+  description?: string;
+  department?: string;
+  faculty?: string;
+  level?: number;
+  credits?: number;
+  is_active?: boolean;
+}
+
+export interface FacultyRecord {
+  id: string;
+  name: string;
+  code?: string | null;
+  is_active: boolean;
+}
+
+export interface DepartmentRecord {
+  id: string;
+  faculty_id: string;
+  name: string;
+  code?: string | null;
+  is_active: boolean;
+}
+
+export interface InstitutionConfig {
+  id: number;
+  university_name: string;
+  logo_url?: string | null;
+  academic_calendar: Record<string, unknown>;
+  policy: Record<string, unknown>;
+  email_policy_mode: 'none' | 'allowlist' | 'denylist';
+  allowed_email_domains: string[];
+  email_whitelist: string[];
+  email_blacklist: string[];
+  rag_model_name?: string | null;
+  rag_embedding_strategy?: string | null;
+  rag_last_rebuild_at?: string | null;
+  rag_rebuild_requested_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  faculties: FacultyRecord[];
+  departments: DepartmentRecord[];
+}
+
+export interface InstitutionConfigPayload {
+  university_name?: string;
+  logo_url?: string;
+  academic_calendar?: Record<string, unknown>;
+  policy?: Record<string, unknown>;
+  email_policy_mode?: 'none' | 'allowlist' | 'denylist';
+  allowed_email_domains?: string[];
+  email_whitelist?: string[];
+  email_blacklist?: string[];
+  rag_model_name?: string;
+  rag_embedding_strategy?: string;
+}
+
+export interface RagOverview {
+  ingestion: Record<string, unknown>;
+  vector_store: Record<string, unknown>;
+  query_performance: Record<string, unknown>;
+  infrastructure: Record<string, unknown>;
+  model_config: Record<string, unknown>;
+}
+
 export const adminApi = {
-  getUsers: async (token: string) => {
-    const response = await fetch(`${API_BASE_URL}/admin/users`, {
+  getUsers: async (
+    token: string,
+    params?: { role?: AdminRole; is_active?: boolean; q?: string; limit?: number; offset?: number }
+  ): Promise<AdminUser[]> => {
+    const query = new URLSearchParams();
+    if (params?.role) query.append('role', params.role);
+    if (params?.is_active !== undefined) query.append('is_active', String(params.is_active));
+    if (params?.q) query.append('q', params.q);
+    if (params?.limit) query.append('limit', String(params.limit));
+    if (params?.offset) query.append('offset', String(params.offset));
+
+    const response = await fetch(`${API_BASE_URL}/api/admin/users?${query}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!response.ok) throw new Error('Failed to fetch users');
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to fetch users');
+    }
     return response.json();
   },
 
-  createUser: async (token: string, userId: string, userData: {
-    email: string;
-    full_name: string;
-    role: 'student' | 'lecturer';
-    password: string;
-    username?: string;
-    phone?: string;
-    university_id?: string;
-    department?: string;
-    faculty?: string;
-    program?: string;
-    year_of_study?: number;
-    courses?: string;
-  }) => {
-    const response = await fetch(`${API_BASE_URL}/admin/users`, {
+  createUser: async (
+    token: string,
+    payloadOrUserId: AdminUserCreatePayload | string,
+    maybePayload?: AdminUserCreatePayload
+  ): Promise<AdminUser> => {
+    const payload = typeof payloadOrUserId === 'string' ? maybePayload : payloadOrUserId;
+    if (!payload) throw new Error('Missing user payload');
+
+    const response = await fetch(`${API_BASE_URL}/api/admin/users`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'X-User-Id': userId,
       },
-      body: JSON.stringify(userData),
+      body: JSON.stringify(payload),
     });
     if (!response.ok) {
-      const error = await response.json();
+      const error = await response.json().catch(() => ({}));
       throw new Error(error.detail || 'Failed to create user');
     }
     return response.json();
   },
 
-  getAnalytics: async (token: string) => {
-    const response = await fetch(`${API_BASE_URL}/admin/analytics`, {
+  updateUser: async (token: string, userId: string, payload: AdminUserUpdatePayload): Promise<AdminUser> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to update user');
+    }
+    return response.json();
+  },
+
+  activateUser: async (token: string, userId: string) => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}/activate`, {
+      method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!response.ok) throw new Error('Failed to fetch analytics');
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to activate user');
+    }
     return response.json();
+  },
+
+  deactivateUser: async (token: string, userId: string) => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}/deactivate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to deactivate user');
+    }
+    return response.json();
+  },
+
+  getCourses: async (
+    token: string,
+    params?: { q?: string; is_active?: boolean; limit?: number; offset?: number }
+  ): Promise<AdminCourse[]> => {
+    const query = new URLSearchParams();
+    if (params?.q) query.append('q', params.q);
+    if (params?.is_active !== undefined) query.append('is_active', String(params.is_active));
+    if (params?.limit) query.append('limit', String(params.limit));
+    if (params?.offset) query.append('offset', String(params.offset));
+    const response = await fetch(`${API_BASE_URL}/api/admin/courses?${query}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to fetch courses');
+    }
+    return response.json();
+  },
+
+  createCourse: async (token: string, payload: AdminCoursePayload): Promise<AdminCourse> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/courses`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to create course');
+    }
+    return response.json();
+  },
+
+  updateCourse: async (
+    token: string,
+    courseCode: string,
+    payload: Partial<Omit<AdminCoursePayload, 'course_code'>>
+  ): Promise<AdminCourse> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/courses/${encodeURIComponent(courseCode)}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to update course');
+    }
+    return response.json();
+  },
+
+  deleteCourse: async (token: string, courseCode: string) => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/courses/${encodeURIComponent(courseCode)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to delete course');
+    }
+    return response.json();
+  },
+
+  getInstitution: async (token: string): Promise<InstitutionConfig> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/institution`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to fetch institution settings');
+    }
+    return response.json();
+  },
+
+  updateInstitution: async (token: string, payload: InstitutionConfigPayload): Promise<InstitutionConfig> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/institution`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to update institution settings');
+    }
+    return response.json();
+  },
+
+  createFaculty: async (token: string, payload: { name: string; code?: string }): Promise<FacultyRecord> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/institution/faculties`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to create faculty');
+    }
+    return response.json();
+  },
+
+  updateFaculty: async (
+    token: string,
+    facultyId: string,
+    payload: { name?: string; code?: string; is_active?: boolean }
+  ): Promise<FacultyRecord> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/institution/faculties/${facultyId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to update faculty');
+    }
+    return response.json();
+  },
+
+  deleteFaculty: async (token: string, facultyId: string) => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/institution/faculties/${facultyId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to delete faculty');
+    }
+    return response.json();
+  },
+
+  createDepartment: async (
+    token: string,
+    payload: { faculty_id: string; name: string; code?: string }
+  ): Promise<DepartmentRecord> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/institution/departments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to create department');
+    }
+    return response.json();
+  },
+
+  updateDepartment: async (
+    token: string,
+    departmentId: string,
+    payload: { faculty_id?: string; name?: string; code?: string; is_active?: boolean }
+  ): Promise<DepartmentRecord> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/institution/departments/${departmentId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to update department');
+    }
+    return response.json();
+  },
+
+  deleteDepartment: async (token: string, departmentId: string) => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/institution/departments/${departmentId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to delete department');
+    }
+    return response.json();
+  },
+
+  getRagOverview: async (token: string): Promise<RagOverview> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/rag`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to fetch RAG overview');
+    }
+    return response.json();
+  },
+
+  updateRag: async (
+    token: string,
+    payload: { rag_model_name?: string; rag_embedding_strategy?: string; request_rebuild?: boolean }
+  ) => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/rag`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to update RAG controls');
+    }
+    return response.json();
+  },
+
+  getAnalytics: async (token: string) => {
+    const [users, courses, rag] = await Promise.all([
+      adminApi.getUsers(token, { limit: 500 }),
+      adminApi.getCourses(token, { limit: 500 }),
+      adminApi.getRagOverview(token),
+    ]);
+    return { users, courses, rag };
   },
 };
 

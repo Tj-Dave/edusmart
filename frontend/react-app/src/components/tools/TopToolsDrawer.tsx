@@ -156,8 +156,8 @@ export default function TopToolsDrawer({
   enrollmentContextByCourse,
   enrolledCourses,
 }: TopToolsDrawerProps) {
-  const canUseStudentTools = role === 'student' || role === 'admin';
-  const canUseLecturerTools = role === 'lecturer' || role === 'admin';
+  const canUseStudentTools = role === 'student';
+  const canUseLecturerTools = role === 'lecturer';
   const [entered, setEntered] = useState(false);
 
   const [surfaceMode, setSurfaceMode] = useState<SurfaceMode>(canUseLecturerTools ? 'lecturer' : 'student');

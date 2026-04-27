@@ -24,6 +24,14 @@ def is_student(user: User) -> bool:
     return _role_value(user) == UserRole.student.value
 
 
+def is_teaching_assistant(user: User) -> bool:
+    return _role_value(user) == UserRole.teaching_assistant.value
+
+
+def is_department_head(user: User) -> bool:
+    return _role_value(user) == UserRole.department_head.value
+
+
 def require_role(user: User, *, allowed: set[str]) -> None:
     role = _role_value(user)
     if role not in allowed:
@@ -45,11 +53,8 @@ def require_lecturer_or_admin_for_offering(
 ) -> CourseOffering:
     offering = get_offering_or_404(db, offering_id)
 
-    if is_admin(actor):
-        return offering
-
     if not is_lecturer(actor):
-        raise ServicePermissionError("Only lecturers/admin can manage this offering")
+        raise ServicePermissionError("Only lecturers can manage this offering")
 
     if not offering.lecturer_user_id:
         raise ServicePermissionError("Offering has no assigned lecturer")
@@ -74,10 +79,8 @@ def require_student_owner_or_admin_for_enrollment(
     actor: User,
 ) -> Enrollment:
     enrollment = get_enrollment_or_404(db, enrollment_id)
-    if is_admin(actor):
-        return enrollment
     if not is_student(actor):
-        raise ServicePermissionError("Only students/admin can perform this action")
+        raise ServicePermissionError("Only students can perform this action")
     if str(enrollment.user_id) != str(actor.id):
         raise ServicePermissionError("You can only access your own enrollment")
     return enrollment
@@ -90,11 +93,8 @@ def require_lecturer_or_admin_for_enrollment(
     actor: User,
 ) -> Enrollment:
     enrollment = get_enrollment_or_404(db, enrollment_id)
-    if is_admin(actor):
-        return enrollment
-
     if not is_lecturer(actor):
-        raise ServicePermissionError("Only lecturers/admin can perform this action")
+        raise ServicePermissionError("Only lecturers can perform this action")
 
     offering = (
         db.query(CourseOffering)
@@ -120,10 +120,7 @@ def require_enrollment_read_access(
     Read-access policy for enrollment-linked views:
     - student: own enrollment only
     - lecturer: enrollments within their offerings only
-    - admin: any enrollment
     """
-    if is_admin(actor):
-        return get_enrollment_or_404(db, enrollment_id)
     if is_student(actor):
         return require_student_owner_or_admin_for_enrollment(
             db,

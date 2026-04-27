@@ -79,13 +79,8 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
   const isDemoBackendAvailable = Boolean(demoToken);
   const useLocalDemo = isPublicPreview && !isDemoBackendAvailable;
   const authToken = isPublicPreview ? (isDemoBackendAvailable ? demoToken : null) : token;
-  const canOpenStudentTools = !isPublicPreview && (user?.role === 'student' || user?.role === 'admin');
-  const canOpenLecturerWorkspace = !isPublicPreview && user?.role === 'admin';
-  const toolsButtonLabel = canOpenStudentTools && canOpenLecturerWorkspace
-    ? 'Tools & Workspace'
-    : canOpenLecturerWorkspace
-    ? 'Workspace'
-    : 'Tools';
+  const canOpenStudentTools = !isPublicPreview && user?.role === 'student';
+  const toolsButtonLabel = 'Tools';
 
   useEffect(() => {
     if (isPublicPreview) return;
@@ -1040,7 +1035,7 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
 
             {/* Header Actions */}
             <div className="flex items-center gap-2">
-              {!isPublicPreview && (canOpenStudentTools || canOpenLecturerWorkspace) && (
+              {!isPublicPreview && canOpenStudentTools && (
                 <button
                   onClick={() => {
                     setShowSettingsMenu(false);
@@ -1132,7 +1127,7 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
           </div>
         </div>
 
-        {!isPublicPreview && (canOpenStudentTools || canOpenLecturerWorkspace) && (
+        {!isPublicPreview && canOpenStudentTools && (
           <TopToolsDrawer
             open={showToolsDrawer}
             onClose={() => setShowToolsDrawer(false)}

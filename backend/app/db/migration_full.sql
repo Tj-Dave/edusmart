@@ -16,6 +16,15 @@ BEGIN;
 -- ============================================================
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Extend existing user_role enum for new governance roles.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
+        ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'teaching_assistant';
+        ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'department_head';
+    END IF;
+END$$;
+
 -- ============================================================
 -- Enums (new — guarded)
 -- ============================================================
@@ -94,6 +103,62 @@ CREATE TABLE IF NOT EXISTS courses (
     CONSTRAINT courses_name_not_empty CHECK (length(trim(course_name)) > 0)
 );
 CREATE INDEX IF NOT EXISTS idx_courses_is_active ON courses(is_active);
+
+
+-- ============================================================
+-- 1b) institution governance tables
+-- ============================================================
+CREATE TABLE IF NOT EXISTS institution_settings (
+    id                       INTEGER PRIMARY KEY DEFAULT 1,
+    university_name          VARCHAR(255) NOT NULL DEFAULT 'EduSmart Institution',
+    logo_url                 TEXT NULL,
+    academic_calendar_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
+    policy_json              JSONB NOT NULL DEFAULT '{}'::jsonb,
+    email_policy_mode        VARCHAR(32) NOT NULL DEFAULT 'none',
+    allowed_email_domains    JSONB NULL,
+    email_whitelist_json     JSONB NULL,
+    email_blacklist_json     JSONB NULL,
+    rag_model_name           VARCHAR(128) NULL,
+    rag_embedding_strategy   VARCHAR(128) NULL,
+    rag_last_rebuild_at      TIMESTAMPTZ NULL,
+    rag_rebuild_requested_at TIMESTAMPTZ NULL,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT institution_settings_name_not_empty CHECK (length(trim(university_name)) > 0),
+    CONSTRAINT institution_settings_email_policy_mode_valid CHECK (email_policy_mode IN ('none','allowlist','denylist')),
+    CONSTRAINT institution_settings_calendar_object CHECK (jsonb_typeof(academic_calendar_json) = 'object'),
+    CONSTRAINT institution_settings_policy_object CHECK (jsonb_typeof(policy_json) = 'object')
+);
+
+INSERT INTO institution_settings (id)
+VALUES (1)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS faculties (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        VARCHAR(255) NOT NULL UNIQUE,
+    code        VARCHAR(64) NULL UNIQUE,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT faculties_name_not_empty CHECK (length(trim(name)) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS departments (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    faculty_id  UUID NOT NULL REFERENCES faculties(id) ON DELETE CASCADE,
+    name        VARCHAR(255) NOT NULL,
+    code        VARCHAR(64) NULL,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT uq_departments_faculty_name UNIQUE (faculty_id, name),
+    CONSTRAINT departments_name_not_empty CHECK (length(trim(name)) > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_departments_faculty_id ON departments(faculty_id);
 
 
 -- ============================================================
@@ -829,6 +894,30 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_ingested_documents_updated_at') THEN
         CREATE TRIGGER trg_ingested_documents_updated_at
         BEFORE UPDATE ON ingested_documents
+        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    END IF;
+
+    -- institution_settings
+    IF to_regclass('public.institution_settings') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_institution_settings_updated_at') THEN
+        CREATE TRIGGER trg_institution_settings_updated_at
+        BEFORE UPDATE ON institution_settings
+        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    END IF;
+
+    -- faculties
+    IF to_regclass('public.faculties') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_faculties_updated_at') THEN
+        CREATE TRIGGER trg_faculties_updated_at
+        BEFORE UPDATE ON faculties
+        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    END IF;
+
+    -- departments
+    IF to_regclass('public.departments') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_departments_updated_at') THEN
+        CREATE TRIGGER trg_departments_updated_at
+        BEFORE UPDATE ON departments
         FOR EACH ROW EXECUTE FUNCTION set_updated_at();
     END IF;
 END$$;

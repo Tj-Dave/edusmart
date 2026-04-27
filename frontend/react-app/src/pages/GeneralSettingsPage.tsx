@@ -28,7 +28,7 @@ const FONT_SIZE_MAP = {
 export default function GeneralSettingsPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const backPath = user?.role === 'lecturer' ? '/lecturer' : '/chat';
+  const backPath = user?.role === 'admin' ? '/admin/dashboard' : user?.role === 'lecturer' ? '/lecturer' : '/chat';
   const [settings, setSettings] = useState<GeneralSettings>(DEFAULT_SETTINGS);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);

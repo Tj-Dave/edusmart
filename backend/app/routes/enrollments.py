@@ -9,6 +9,11 @@ from sqlalchemy.orm import Session
 from app.db.postgres import get_db
 from app.services.auth.deps import get_current_user
 from app.db.models import User, UserRole
+from app.routes._service_errors import to_http_exception
+from app.services.access_control import (
+    require_enrollment_read_access,
+    require_lecturer_or_admin_for_enrollment,
+)
 
 from app.db import crud_courses
 from app.models.course_schemas import (
@@ -75,7 +80,7 @@ def enroll_by_key(
 ):
     target_user_id = payload.user_id or str(current_user.id)
     if payload.user_id and payload.user_id != str(current_user.id):
-        if current_user.role not in {UserRole.admin, UserRole.lecturer}:
+        if current_user.role != UserRole.lecturer:
             raise HTTPException(status_code=403, detail="Not allowed to enroll other users")
 
     try:
@@ -102,7 +107,7 @@ def enroll_open_offering(
     """
     target_user_id = payload.user_id or str(current_user.id)
     if payload.user_id and payload.user_id != str(current_user.id):
-        if current_user.role not in {UserRole.admin, UserRole.lecturer}:
+        if current_user.role != UserRole.lecturer:
             raise HTTPException(status_code=403, detail="Not allowed to enroll other users")
 
     try:
@@ -127,11 +132,18 @@ def list_enrollments(
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=100000),
 ):
+    if current_user.role == UserRole.admin:
+        raise HTTPException(status_code=403, detail="Admins cannot access enrollment workflows")
+
+    resolved_user_id = user_id
+    if current_user.role == UserRole.student:
+        resolved_user_id = str(current_user.id)
+
     try:
         return crud_courses.list_enrollments(
             db,
             offering_id=offering_id,
-            user_id=user_id,
+            user_id=resolved_user_id,
             status=status,
             limit=limit,
             offset=offset,
@@ -147,6 +159,17 @@ def set_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if current_user.role != UserRole.lecturer:
+        raise HTTPException(status_code=403, detail="Only lecturers can update enrollment status")
+    try:
+        require_lecturer_or_admin_for_enrollment(
+            db,
+            enrollment_id=enrollment_id,
+            actor=current_user,
+        )
+    except Exception as e:
+        raise to_http_exception(e)
+
     try:
         return crud_courses.set_enrollment_status(
             db,
@@ -167,6 +190,15 @@ def list_events(
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=100000),
 ):
+    try:
+        require_enrollment_read_access(
+            db,
+            enrollment_id=enrollment_id,
+            actor=current_user,
+        )
+    except Exception as e:
+        raise to_http_exception(e)
+
     return crud_courses.list_enrollment_events(
         db,
         enrollment_id=enrollment_id,

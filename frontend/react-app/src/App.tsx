@@ -1,22 +1,24 @@
-// src/App.tsx
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './state/AuthContext';
 
-import SetupPage from './pages/SetupPage';
-import LoginPage from './pages/LoginPage';
-import CredentialsLoginPage from './pages/CredentialsLoginPage';
-import SignupPage from './pages/SignupPage';
-import ChatPage from './pages/ChatPage';
-import LecturerWorkspacePage from './pages/LecturerWorkspacePage';
-import CourseSelectionPage from './pages/CourseSelectionPage';
-import AdminUsersPage from './pages/AdminUsersPage';
-import AdminDashboard from './pages/AdminDashboard';
-import UploadPage from './pages/UploadPage';
-import SetPasswordPage from './pages/SetPasswordPage';
 import AccountSettingsPage from './pages/AccountSettingsPage';
+import AdminCoursesPage from './pages/AdminCoursesPage';
+import AdminDashboard from './pages/AdminDashboard';
+import AdminInstitutionPage from './pages/AdminInstitutionPage';
+import AdminRagMonitoringPage from './pages/AdminRagMonitoringPage';
+import AdminSettingsPage from './pages/AdminSettingsPage';
+import AdminUsersPage from './pages/AdminUsersPage';
+import ChatPage from './pages/ChatPage';
+import CourseSelectionPage from './pages/CourseSelectionPage';
+import CredentialsLoginPage from './pages/CredentialsLoginPage';
 import GeneralSettingsPage from './pages/GeneralSettingsPage';
-
+import LecturerWorkspacePage from './pages/LecturerWorkspacePage';
+import LoginPage from './pages/LoginPage';
+import SetPasswordPage from './pages/SetPasswordPage';
+import SetupPage from './pages/SetupPage';
+import SignupPage from './pages/SignupPage';
+import UploadPage from './pages/UploadPage';
 
 function AuthLoadingScreen() {
   return (
@@ -29,67 +31,60 @@ function AuthLoadingScreen() {
   );
 }
 
-
-// ==================== Home Router (Role-Based Navigation) ====================
 function HomeRouter() {
   const { user, isLoading } = useAuth();
   const navigate = useNavigate();
-  
+
   React.useEffect(() => {
-    if (isLoading || !user) {
-      return;
-    }
+    if (isLoading || !user) return;
     if (user.role === 'admin') {
       navigate('/admin/dashboard', { replace: true });
-    } else if (user.role === 'lecturer') {
-      navigate('/lecturer', { replace: true });
-    } else {
-      navigate('/chat', { replace: true });
+      return;
     }
-  }, [isLoading, user, navigate]);
+    if (user.role === 'lecturer') {
+      navigate('/lecturer', { replace: true });
+      return;
+    }
+    navigate('/chat', { replace: true });
+  }, [isLoading, navigate, user]);
 
-  if (isLoading) {
-    return <AuthLoadingScreen />;
-  }
-
-  if (!user) {
-    return <ChatPage publicMode />;
-  }
-
-  return <div className="flex items-center justify-center h-screen">Redirecting...</div>;
+  if (isLoading) return <AuthLoadingScreen />;
+  if (!user) return <ChatPage publicMode />;
+  return <div className="flex h-screen items-center justify-center text-sm text-gray-600">Redirecting...</div>;
 }
 
 function ChatRoute() {
   const { user, isLoading } = useAuth();
-  if (isLoading) {
-    return <AuthLoadingScreen />;
-  }
-  if (!user) {
-    return <ChatPage publicMode />;
-  }
-  if (user?.role === 'lecturer') {
-    return <Navigate to="/lecturer" replace />;
-  }
+  if (isLoading) return <AuthLoadingScreen />;
+  if (!user) return <ChatPage publicMode />;
+  if (user.role === 'lecturer') return <Navigate to="/lecturer" replace />;
+  if (user.role === 'admin') return <Navigate to="/admin/dashboard" replace />;
   return <ChatPage />;
 }
 
 function LecturerRoute() {
   const { user, isLoading } = useAuth();
-  if (isLoading) {
-    return <AuthLoadingScreen />;
-  }
-  if (!user) {
-    return <Navigate to="/login" replace />;
-  }
-  if (user.role !== 'lecturer' && user.role !== 'admin') {
+  if (isLoading) return <AuthLoadingScreen />;
+  if (!user) return <Navigate to="/login" replace />;
+  if (user.role !== 'lecturer') {
+    if (user.role === 'admin') return <Navigate to="/admin/dashboard" replace />;
     return <Navigate to="/chat" replace />;
   }
   return <LecturerWorkspacePage />;
 }
 
-// ==================== Main Router ====================
+function AdminRoute({ children }: { children: React.ReactElement }) {
+  const { user, isLoading } = useAuth();
+  if (isLoading) return <AuthLoadingScreen />;
+  if (!user) return <Navigate to="/login" replace />;
+  if (user.role !== 'admin') {
+    if (user.role === 'lecturer') return <Navigate to="/lecturer" replace />;
+    return <Navigate to="/chat" replace />;
+  }
+  return children;
+}
+
 function AppRouter() {
-  // For UI-only development: skip all guards and just render the pages
   return (
     <BrowserRouter>
       <Routes>
@@ -104,8 +99,55 @@ function AppRouter() {
         <Route path="/account-settings" element={<AccountSettingsPage />} />
         <Route path="/general-settings" element={<GeneralSettingsPage />} />
         <Route path="/upload" element={<UploadPage />} />
-        <Route path="/admin/users" element={<AdminUsersPage />} />
-        <Route path="/admin/dashboard" element={<AdminDashboard />} />
+        <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
+        <Route
+          path="/admin/dashboard"
+          element={
+            <AdminRoute>
+              <AdminDashboard />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={
+            <AdminRoute>
+              <AdminUsersPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/courses"
+          element={
+            <AdminRoute>
+              <AdminCoursesPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/institution"
+          element={
+            <AdminRoute>
+              <AdminInstitutionPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/rag-monitoring"
+          element={
+            <AdminRoute>
+              <AdminRagMonitoringPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/settings"
+          element={
+            <AdminRoute>
+              <AdminSettingsPage />
+            </AdminRoute>
+          }
+        />
         <Route path="/" element={<HomeRouter />} />
         <Route path="*" element={<Navigate to="/chat" replace />} />
       </Routes>
@@ -113,7 +155,6 @@ function AppRouter() {
   );
 }
 
-// ==================== App Wrapper ====================
 export default function App() {
   return (
     <AuthProvider>
