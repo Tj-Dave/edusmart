@@ -43,7 +43,9 @@ docs/CS102/
 
 logs/
 *.log
-
+backend/logs/
+backend/app/logs/
+backend/app/scripts/test/
 
 # ---------------------------------
 # Model files (large LLM weights)
@@ -85,3 +87,4 @@ frontend/react-app/node_modules/.vite/
 # ---------------------------------
 docs/BIO1101
 docs/CS102
+.amazonq/

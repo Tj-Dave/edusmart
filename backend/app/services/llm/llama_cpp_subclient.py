@@ -123,3 +123,73 @@ User query:
 
     def generate(self, prompt: str, use_chat_format: bool = False) -> str:
         return self._generate(prompt, use_chat_format=use_chat_format)
+
+    async def generate_with_overrides(self, prompt: str, **overrides) -> str:
+        """
+        Generate text with per-call parameter overrides.
+        
+        This method allows temporary parameter overrides without modifying
+        global configuration. Original parameters are restored after execution.
+        
+        Args:
+            prompt: Input prompt string
+            **overrides: Generation parameters to override (temperature, top_p, top_k, max_tokens, etc.)
+            
+        Returns:
+            Generated text string
+            
+        Example:
+            response = await llm.generate_with_overrides(
+                prompt="...",
+                temperature=0.0,
+                top_p=1.0,
+                top_k=1,
+                max_tokens=120
+            )
+        """
+        # Extract use_chat_format if provided in overrides
+        use_chat_format = overrides.pop("use_chat_format", False)
+        
+        # Build generation parameters
+        params = {
+            "max_tokens": settings.QUERY_LLM_MAX_TOKENS,
+            "temperature": settings.QUERY_LLM_TEMPERATURE,
+            "top_p": settings.QUERY_LLM_TOP_P,
+        }
+        
+        # Apply overrides
+        params.update(overrides)
+        
+        # Generate using appropriate mode
+        if not use_chat_format:
+            # Raw completion mode
+            result = self.llm(
+                prompt,
+                max_tokens=params.get("max_tokens"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                top_k=params.get("top_k"),  # May be None if not provided
+                stop=params.get("stop", ["}", "\n\n"]),
+            )
+            return (result["choices"][0]["text"] or "").strip()
+        else:
+            # Chat format mode
+            chat_format = (getattr(settings, "QUERY_LLM_MODEL_FAMILY", "") or "").lower()
+            if chat_format in ("phi-3-mini", "phi-3", "phi"):
+                self.llm.chat_format = "phi-3"
+            else:
+                self.llm.chat_format = "chatml"
+
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt},
+            ]
+
+            out = self.llm.create_chat_completion(
+                messages=messages,
+                max_tokens=params.get("max_tokens"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                top_k=params.get("top_k"),  # May be None if not provided
+            )
+            return (out["choices"][0]["message"]["content"] or "").strip()

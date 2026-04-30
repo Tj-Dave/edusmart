@@ -15,6 +15,7 @@ from app.services.bloom_detector import BloomDetector
 from app.services.rag_engine import RAGEngine
 from app.db.vector_store import VectorStore
 from app.services.memory.memory_manager import MemoryManagerPG
+from app.services.logging.pipeline_logger import PipelineLogger
 
 from app.routes.ai_query import router as ai_query_router
 from app.routes.chats import router as chats_router
@@ -63,6 +64,8 @@ memory_manager = MemoryManagerPG(
     app_namespace="edusmart",
 )
 
+pipeline_logger = PipelineLogger(log_dir="logs")
+
 # Store in app.state
 app.state.llm_client = llm_client
 app.state.llm_subclient = llm_subclient
@@ -74,6 +77,7 @@ app.state.competency_mapper = competency_mapper
 app.state.bloom_detector = bloom_detector
 app.state.rag_engine = rag_engine
 app.state.memory_manager = memory_manager
+app.state.pipeline_logger = pipeline_logger
 
 # Routers
 app.include_router(auth_router)
@@ -89,6 +93,16 @@ app.include_router(progress_router)
 app.include_router(gamification_router)
 app.include_router(notifications_sse_router)
 app.include_router(admin_router)
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background services on application startup."""
+    await app.state.pipeline_logger.start()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop background services on application shutdown."""
+    await app.state.pipeline_logger.stop()
 
 @app.get("/health")
 def health():
