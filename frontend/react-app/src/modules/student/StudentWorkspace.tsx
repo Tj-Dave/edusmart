@@ -5,6 +5,7 @@ import { useAuth } from '../../state/AuthContext';
 import { chatApi, ingestionApi, enrollmentApi, courseApi } from '../../services/api';
 import MarkdownMessage from '../../components/markdownMessage';
 import TopToolsDrawer from '../../components/tools/TopToolsDrawer';
+import { useLLMStream } from '../../hooks/useLLMStream';
 import {
   DEFAULT_CHAT_TITLE,
   DEMO_AUTH_TOKEN,
@@ -14,7 +15,6 @@ import {
 } from './constants';
 import { useStudentEnrollment } from './hooks/useStudentEnrollment';
 import type {
-  Citation,
   StudentChatHistory as ChatHistory,
   StudentChatSession as ChatSession,
   StudentMessage as Message,
@@ -45,6 +45,8 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [streamingMessageId, setStreamingMessageId] = useState<number | null>(null);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isFetchingSession, setIsFetchingSession] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => (typeof window !== 'undefined' ? window.innerWidth >= 1024 : true));
@@ -82,26 +84,17 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
   const canOpenStudentTools = !isPublicPreview && user?.role === 'student';
   const toolsButtonLabel = 'Tools';
 
+  const { isStreaming, partialText, startStream, abortStream } = useLLMStream({
+    token: authToken || '',
+  });
+  const hasActiveAssistantPlaceholder = streamingMessageId !== null && isLoading;
+
   useEffect(() => {
     if (isPublicPreview) return;
     if (user?.role === 'lecturer') {
       navigate('/lecturer', { replace: true });
     }
   }, [isPublicPreview, navigate, user?.role]);
-
-  const getCitationRole = (citation: any): string => {
-    const roleCandidate = citation?.role || citation?.uploader_role || citation?.source_role || citation?.metadata?.uploader_role;
-    return typeof roleCandidate === 'string' ? roleCandidate.toLowerCase() : '';
-  };
-
-  const mapCitation = (citation: any): Citation => ({
-    id: citation?.id?.toString() || citation?.document_id?.toString() || undefined,
-    title: citation?.title || citation?.file_name || citation?.source || 'Reference material',
-    snippet: citation?.snippet || citation?.summary || citation?.text || '',
-    source: citation?.source || citation?.file_name || citation?.document_id,
-    role: getCitationRole(citation),
-    url: citation?.url || citation?.link,
-  });
 
   const bumpPublicUsage = () => {
     setPublicQueryCount(prev => {
@@ -254,7 +247,7 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
   // ==================== HANDLERS ====================
 
   const sendMessage = async () => {
-    if (!inputValue.trim() || isLoading) return;
+    if (!inputValue.trim() || isLoading || isStreaming) return;
 
     if (isPublicPreview && publicQueryCount >= 3) {
       setShowPublicLimitModal(true);
@@ -264,157 +257,123 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
 
     const trimmedMessage = inputValue.trim();
 
-    // optimistic UI
+    // Demo mode: keep local mock behavior (no streaming)
+    if (useLocalDemo) {
+      const userMessage: Message = {
+        role: "user",
+        content: trimmedMessage,
+        timestamp: new Date().toISOString(),
+      };
+      setMessages(prev => [...prev, userMessage]);
+      setInputValue("");
+      setShowComposerExtras(false);
+      setIsLoading(true);
+      setError(null);
+
+      const aiMessage = buildLocalDemoAssistantReply(trimmedMessage);
+      setMessages(prev => [...prev, aiMessage]);
+
+      if ((messages?.length || 0) === 0) {
+        const chatTitle = deriveChatTitle(trimmedMessage);
+        setChatHistory(prev =>
+          prev.map(chat =>
+            chat.session_id === currentSession?.id ? { ...chat, title: chatTitle } : chat
+          )
+        );
+        setCurrentChatTitle(chatTitle);
+      }
+
+      setCurrentSession(prev => (prev ? { ...prev, message_count: prev.message_count + 2 } : prev));
+      if (isPublicPreview) bumpPublicUsage();
+      setIsLoading(false);
+      return;
+    }
+
+    if (!authToken) {
+      setError("Your session expired. Please log in again.");
+      return;
+    }
+
+    // Unified streaming path for ALL messages (first and subsequent)
     const userMessage: Message = {
       role: "user",
       content: trimmedMessage,
       timestamp: new Date().toISOString(),
     };
 
-    setMessages(prev => [...prev, userMessage]);
+    const placeholderId = -(Date.now() + Math.floor(Math.random() * 1000));
+
+    setMessages(prev => [...prev, userMessage, {
+      id: placeholderId,
+      role: "assistant",
+      content: "",
+      timestamp: new Date().toISOString(),
+    }]);
+
     setInputValue("");
     setShowComposerExtras(false);
     setIsLoading(true);
     setError(null);
+    setStreamingMessageId(placeholderId);
 
     try {
-      // Demo-local flow unchanged
-      if (useLocalDemo) {
-        const aiMessage = buildLocalDemoAssistantReply(trimmedMessage);
-        setMessages(prev => [...prev, aiMessage]);
-
-        // set title on first message (local)
-        if ((messages?.length || 0) === 0) {
-          const chatTitle = deriveChatTitle(trimmedMessage);
-          setChatHistory(prev =>
-            prev.map(chat =>
-              chat.session_id === currentSession?.id ? { ...chat, title: chatTitle } : chat
-            )
-          );
+      await startStream({
+        message: trimmedMessage,
+        courseId: courseCode || undefined,
+        sessionId: activeSessionId,
+        onSessionCreated: (newSessionId, title) => {
+          setActiveSessionId(newSessionId);
+          setCurrentSession({
+            id: newSessionId,
+            course_code: courseCode || 'GENERAL',
+            course_name: courseName || 'General Chat',
+            created_at: new Date().toISOString(),
+            message_count: 0,
+          });
+          const chatTitle = title || deriveChatTitle(trimmedMessage);
+          setChatHistory(prev => [
+            {
+              session_id: newSessionId,
+              title: chatTitle,
+              created_at: new Date().toISOString(),
+            },
+            ...prev,
+          ]);
           setCurrentChatTitle(chatTitle);
-        }
-
-        setCurrentSession(prev => (prev ? { ...prev, message_count: prev.message_count + 2 } : prev));
-        if (isPublicPreview) bumpPublicUsage();
-        return;
-      }
-
-      // Auth check
-      if (!authToken) {
-        setError("Your session expired. Please log in again.");
-        return;
-      }
-
-      // ✅ If NO active session => use atomic query endpoint (creates session + stores msgs)
-      if (!currentSession?.id) {
-        const detail = await chatApi.queryAtomic(
-          authToken,
-          trimmedMessage,
-          courseCode?.trim() || null,
-          500
-        );
-
-        const session = detail?.session;
-        const msgs = Array.isArray(detail?.messages) ? detail.messages : [];
-        const rawCitations = Array.isArray(detail?.citations)
-          ? detail.citations
-          : Array.isArray(detail?.references)
-          ? detail.references
-          : [];
-
-        const normalizedMessages: Message[] = msgs.map((m: any) => ({
-          id: typeof m?.id === "number" ? m.id : undefined,
-          role: m?.role === "assistant" ? "assistant" : "user",
-          content: typeof m?.content === "string" ? m.content : "",
-          timestamp: m?.created_at ? new Date(m.created_at).toISOString() : undefined,
-        }));
-        const lecturerCitations = rawCitations
-          .filter((citation: any) => getCitationRole(citation) === "lecturer")
-          .map(mapCitation);
-        const hiddenCitationCount = rawCitations.length - lecturerCitations.length;
-        const latestAssistantIndex = typeof detail?.message_id === 'number'
-          ? normalizedMessages.findIndex((message) => message.id === detail.message_id)
-          : normalizedMessages.map((message) => message.role).lastIndexOf('assistant');
-        if (latestAssistantIndex >= 0) {
-          normalizedMessages[latestAssistantIndex] = {
-            ...normalizedMessages[latestAssistantIndex],
-            citations: lecturerCitations,
-            hiddenCitationCount: hiddenCitationCount > 0 ? hiddenCitationCount : undefined,
-          };
-        }
-
-        const sessionId = (session?.id || session?.session_id)?.toString();
-        if (!sessionId) throw new Error("Backend did not return session id.");
-
-        const normalizedSession: ChatSession = {
-          id: sessionId,
-          course_code: session?.course_id || "",
-          course_name: (session?.course_id || "").trim()
-            ? (courseName || session?.course_id)
-            : NO_COURSE_LABEL,
-          created_at: session?.created_at || new Date().toISOString(),
-          message_count: typeof session?.message_count === "number"
-            ? session.message_count
-            : normalizedMessages.length,
-        };
-
-        setCurrentSession(normalizedSession);
-        setMessages(normalizedMessages);
-
-        const resolvedTitle = session?.title || deriveChatTitle(trimmedMessage);
-        setCurrentChatTitle(resolvedTitle);
-
-        // Sidebar: DB-only list, but we can refresh + ensure it appears instantly
-        setChatHistory(prev => {
-          const filtered = prev.filter(c => c.session_id !== sessionId);
-          return [{ session_id: sessionId, title: resolvedTitle, created_at: normalizedSession.created_at }, ...filtered];
-        });
-
-        // Optional: refresh from backend to guarantee DB truth
-        // await refreshSessions();
-
-        return;
-      }
-
-      // ✅ If session exists, you can keep using /chats/{id}/messages
-      const response = await chatApi.sendMessage(authToken, currentSession.id, trimmedMessage);
-
-      const rawCitations = Array.isArray(response?.citations)
-        ? response.citations
-        : Array.isArray(response?.references)
-        ? response.references
-        : [];
-
-      const lecturerCitations = rawCitations
-        .filter((citation: any) => getCitationRole(citation) === "lecturer")
-        .map(mapCitation);
-
-      const hiddenCitationCount = rawCitations.length - lecturerCitations.length;
-
-      const aiMessage: Message = {
-        id: response.message_id,
-        role: "assistant",
-        content: response.response || "I apologize, but I could not generate a response. Please try again.",
-        timestamp: new Date().toISOString(),
-        citations: lecturerCitations,
-        hiddenCitationCount: hiddenCitationCount > 0 ? hiddenCitationCount : undefined,
-      };
-
-      setMessages(prev => [...prev, aiMessage]);
-
-      setCurrentSession(prev =>
-        prev ? { ...prev, message_count: prev.message_count + 2 } : prev
-      );
-
-      if (isPublicPreview) bumpPublicUsage();
+        },
+        onDone: (fullResponse, sessionId, citations) => {
+          setMessages(prev => prev.map((msg) =>
+            msg.id === placeholderId
+              ? { ...msg, content: fullResponse, citations, timestamp: new Date().toISOString() }
+              : msg
+          ));
+          setStreamingMessageId(null);
+          setActiveSessionId(sessionId);
+          setIsLoading(false);
+          if (isPublicPreview) bumpPublicUsage();
+        },
+        onError: (errorMsg, partialResponse) => {
+          setError(errorMsg);
+          if (partialResponse) {
+            setMessages(prev => prev.map((msg) =>
+              msg.id === placeholderId
+                ? { ...msg, content: partialResponse + '\n\n_[Stream interrupted]_' }
+                : msg
+            ));
+          } else {
+            setMessages(prev => prev.filter((msg) => msg.id !== placeholderId));
+            setInputValue(trimmedMessage);
+          }
+          setStreamingMessageId(null);
+          setIsLoading(false);
+        },
+      });
     } catch (err: any) {
       console.error("Failed to send message:", err);
       setError(err?.message || "Failed to send message. Please try again.");
-
-      // rollback optimistic user msg
-      setMessages(prev => prev.slice(0, -1));
+      setMessages(prev => prev.filter((msg) => msg.id !== placeholderId));
       setInputValue(trimmedMessage);
-    } finally {
+      setStreamingMessageId(null);
       setIsLoading(false);
     }
   };
@@ -429,6 +388,25 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
       e.preventDefault();
       sendMessage();
     }
+  };
+
+  const handleStopGenerating = () => {
+    const activeMessageId = streamingMessageId;
+    if (activeMessageId === null) return;
+
+    abortStream();
+    setMessages(prev => {
+      if (partialText.trim().length === 0) {
+        return prev.filter((msg) => msg.id !== activeMessageId);
+      }
+      return prev.map((msg) =>
+        msg.id === activeMessageId
+          ? { ...msg, content: `${partialText}\n\n_[Stream interrupted]_`, timestamp: new Date().toISOString() }
+          : msg
+      );
+    });
+    setStreamingMessageId(null);
+    setIsLoading(false);
   };
 
   const handleReferenceFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -509,6 +487,7 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
       setError(null);
       setPublicQueryCount(0);
       setShowPublicLimitModal(false);
+      setActiveSessionId(null);
       return;
     }
 
@@ -520,15 +499,17 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
       setError(null);
       setPublicQueryCount(0);
       setShowPublicLimitModal(false);
+      setActiveSessionId(null);
       return;
     }
 
-    // ✅ Real mode: draft-only (NO session creation)
+    // Real mode: draft-only (NO session creation)
     setCurrentSession(null);
     setMessages([]);
     setCurrentChatTitle(DEFAULT_CHAT_TITLE);
     setError(null);
     setOpenMenuSessionId(null);
+    setActiveSessionId(null);
   };
 
   const handleSelectChat = async (sessionId: string) => {
@@ -576,6 +557,7 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
 
       setCurrentSession(normalizedSession);
       setMessages(normalizedMessages);
+      setActiveSessionId(normalizedSession.id);
 
       // ✅ Update title in header + sidebar
       // If backend includes session.title use it; otherwise keep sidebar title
@@ -602,6 +584,7 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
   const applyCourseSelection = async (course: { code: string; name: string }) => {
     selectCourse(course.code, course.name);
     setShowCourseDropdown(false);
+    setActiveSessionId(null); // Reset session on course switch
 
     if (!token) return;
     try {
@@ -1152,24 +1135,40 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
                 <p className="text-gray-500">
                   {isPublicPreview
                     ? 'This preview uses our demo corpus so you can feel the real chat flow. Sign in when you are ready to bring in your lecturers and uploads.'
-                    : `You’re currently exploring ${activeCourseName}. Ask EduSmart a question to get started. I’m here to help you master the material.`}
+                    : `You’re currently exploring ${activeCourseName}. Ask EduScape AI a question to get started. I’m here to help you master the material.`}
                 </p>
               </div>
             </div>
           ) : (
             <div className="space-y-4 max-w-4xl mx-auto">
-              {messages.map((msg, idx) => (
+              {messages.map((msg, idx) => {
+                const isStreamingMsg = msg.id === streamingMessageId;
+                const displayContent = isStreamingMsg ? partialText : msg.content;
+                const hasStreamingTokens = isStreamingMsg && displayContent.trim().length > 0;
+                
+                return (
                 <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div
-                    className={`max-w-2xl ${
+                    className={`max-w-2xl transition-all duration-200 ${
                       msg.role === 'user'
                         ? 'bg-blue-600 text-white rounded-3xl rounded-tr-none px-5 py-3 shadow-lg shadow-blue-200'
+                        : hasStreamingTokens
+                        ? 'bg-blue-50 text-gray-900 rounded-3xl rounded-tl-none px-5 py-3 border border-blue-200 border-l-4 border-l-blue-500 shadow-lg'
                         : 'bg-white text-gray-900 rounded-3xl rounded-tl-none px-5 py-3 border border-gray-100 shadow'
                     }`}
                   >
-                    {/* <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p> */}
-                    <MarkdownMessage content={msg.content} />
-                    {msg.timestamp && (
+                    {/* Show content or loading dots */}
+                    {isStreamingMsg && !displayContent ? (
+                      <div className="flex gap-1 py-2">
+                        <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce"></div>
+                        <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                        <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                      </div>
+                    ) : (
+                      <MarkdownMessage content={displayContent} />
+                    )}
+                    
+                    {msg.timestamp && !isStreamingMsg && (
                       <p className={`text-xs mt-2 ${msg.role === 'user' ? 'text-blue-100' : 'text-gray-400'}`}>
                         {new Date(msg.timestamp).toLocaleTimeString([], {
                           hour: '2-digit',
@@ -1198,18 +1197,8 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
                     )}
                   </div>
                 </div>
-              ))}
-              {isLoading && (
-                <div className="flex justify-start">
-                  <div className="bg-white text-gray-500 rounded-3xl rounded-tl-none px-5 py-3 border border-gray-100 shadow">
-                    <div className="flex gap-1">
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                    </div>
-                  </div>
-                </div>
-              )}
+                );
+              })}
               <div ref={messagesEndRef} />
             </div>
           )}
@@ -1244,21 +1233,33 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   onKeyDown={handleComposerKeyDown}
-                  placeholder={`Ask EduSmart anything about ${activeCourseName || 'this course'}...`}
+                  placeholder={`Ask EduScape AI anything about ${activeCourseName || 'this course'}...`}
                   className="flex-1 bg-transparent border-none text-base text-gray-900 placeholder:text-gray-400 focus:ring-0 focus:outline-none resize-none min-h-[56px] max-h-48"
                   rows={1}
                   disabled={isLoading}
                   maxLength={2000}
                 />
 
-                <div className="flex items-center">
+                <div className="flex items-center gap-2">
+                  {hasActiveAssistantPlaceholder && (
+                    <button
+                      type="button"
+                      onClick={handleStopGenerating}
+                      className="p-2.5 rounded-2xl bg-red-600 text-white hover:bg-red-500 transition shadow-lg shadow-red-200"
+                      title="Stop generating"
+                    >
+                      <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                        <rect x="6" y="6" width="12" height="12" rx="1" />
+                      </svg>
+                    </button>
+                  )}
                   <button
                     type="submit"
-                    disabled={isLoading || !inputValue.trim()}
+                    disabled={isLoading || isStreaming || !inputValue.trim()}
                     className="p-2.5 rounded-2xl bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition shadow-lg shadow-blue-200"
                     title="Send"
                   >
-                    {isLoading ? (
+                    {isLoading || isStreaming ? (
                       <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-30" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                         <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
@@ -1351,7 +1352,7 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
 
               {isPublicPreview && (
                 <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50 px-5 py-4 text-sm text-blue-900 space-y-3">
-                  <p className="font-semibold">Flip this into your real LMS: sign in and EduSmart will cite your lecturers, rubrics, and uploader docs.</p>
+                  <p className="font-semibold">Flip this into your real LMS: sign in and EduScape AI will cite your lecturers, rubrics, and uploader docs.</p>
                   <div className="flex flex-wrap gap-3">
                     <button
                       type="button"

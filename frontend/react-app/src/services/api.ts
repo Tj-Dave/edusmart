@@ -586,8 +586,12 @@ const safeParseError = async (response: Response) => {
 };
 
 export const chatApi = {
-  // ✅ NEW: Atomic first-message endpoint
-    queryAtomic: async (
+  /**
+   * @deprecated Use unified streaming endpoint /ai-query/stream instead.
+   * This method creates a session atomically but does not stream responses.
+   * For streaming with session creation, use the useLLMStream hook.
+   */
+  queryAtomic: async (
       token: string,
       content: string,
       courseCode?: string | null,

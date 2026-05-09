@@ -10,6 +10,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Form, Request
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
 
 from app.db.postgres import get_db
 from app.db import crud_chats
@@ -24,7 +26,7 @@ from app.services.auth.deps import get_current_user
 from app.db.models import User
 
 # reuse your AI pipeline function
-from app.routes.ai_query import run_ai_pipeline
+from app.routes.ai_query import run_ai_pipeline, run_ai_pipeline_streaming
 
 #   =================================
 #   Helper Functions
@@ -167,6 +169,15 @@ def _extract_latest_assistant_message_id(messages: list) -> Optional[int]:
 router = APIRouter(prefix="/chats", tags=["chats"])
 
 
+class ChatStreamRequest(BaseModel):
+    """Request model for chat-managed streaming endpoint."""
+    message: str
+    course_id: Optional[str] = None
+    topic_id: Optional[str] = None
+    session_id: Optional[str] = None
+    attachments: Optional[list] = None
+
+
 @router.post("", response_model=ChatSessionOut)
 def create_chat(
     payload: ChatSessionCreate,
@@ -218,6 +229,81 @@ def get_chat_with_messages(
 
     msgs = crud_chats.list_messages(db, user_id=str(current_user.id), session_id=session_id, limit=limit)
     return {"session": s, "messages": msgs}
+
+
+@router.post("/stream")
+async def chat_stream(
+    payload: ChatStreamRequest,
+    req: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Streaming endpoint owned by chats router.
+
+    Handles session management/title generation here, then delegates full AI pipeline streaming.
+    """
+    content = (payload.message or "").strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="message is required")
+
+    user_id = str(current_user.id)
+    course_code = (payload.course_id or "").strip() or None
+    session_uuid: Optional[UUID] = None
+    created_session_title: Optional[str] = None
+
+    if payload.session_id:
+        try:
+            session_uuid = UUID(payload.session_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid session_id format")
+    else:
+        # Session creation + title generation are managed in chats.py
+        title = await _generate_phi_title(req, content)
+        try:
+            created_session = crud_chats.create_chat_session(
+                db,
+                user_id=user_id,
+                course_id=course_code,
+                title=title,
+                auto_create_course=True,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        session_uuid = created_session.id
+        created_session_title = getattr(created_session, "title", None) or title
+
+    async def event_generator():
+        # Preserve frontend expectation for first-message streaming hydration
+        if created_session_title and session_uuid:
+            yield {
+                "data": json.dumps(
+                    {
+                        "session_id": str(session_uuid),
+                        "session_title": created_session_title,
+                    }
+                )
+            }
+
+        async for event_data in run_ai_pipeline_streaming(
+            user_query=content,
+            req=req,
+            db=db,
+            user_id=user_id,
+            session_id=session_uuid,
+            course_id=course_code,
+        ):
+            yield {"data": json.dumps(event_data)}
+
+    return EventSourceResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/{session_id}/messages")

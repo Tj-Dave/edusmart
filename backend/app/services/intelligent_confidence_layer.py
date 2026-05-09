@@ -125,7 +125,7 @@ class IntelligentConfidenceLayer:
                 temperature=0.0,
                 top_p=1.0,
                 top_k=1,
-                max_tokens=200,
+                max_tokens=500,
             )
 
             if not raw_response or not raw_response.strip():

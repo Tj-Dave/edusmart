@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import AsyncGenerator, Generator, Any
+
 from llama_cpp import Llama
 from app.core.config import settings
 import threading
@@ -14,6 +21,7 @@ class LLMClient:
                     cls._instance = super(LLMClient, cls).__new__(cls)
                     cls._instance.llm = None
                     cls._instance.mock_mode = False
+                    cls._instance._executor = ThreadPoolExecutor(max_workers=4)
                     cls._instance._initialize_model()
         return cls._instance
 
@@ -94,6 +102,7 @@ class LLMClient:
                 raise  # CPU load failing is a real failure
 
     def generate(self, prompt: str) -> str:
+        """Generate a complete response synchronously using chat completion."""
         if self.mock_mode:
             return "[MOCK RESPONSE] LLM mock mode is enabled."
 
@@ -109,3 +118,101 @@ class LLMClient:
             top_p=settings.FINAL_LLM_TOP_P,
         )
         return response["choices"][0]["message"]["content"].strip()
+
+    def generate_stream(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        max_tokens: int | None = None,
+    ) -> Generator[str, None, None]:
+        """Generate response as a stream of tokens using raw completion.
+        
+        Args:
+            prompt: Input prompt string
+            temperature: Sampling temperature (default: from settings)
+            top_p: Nucleus sampling parameter (default: from settings)
+            top_k: Top-k sampling parameter (default: None)
+            max_tokens: Maximum tokens to generate (default: from settings)
+            
+        Yields:
+            Individual tokens as they are generated
+        """
+        if self.mock_mode:
+            yield from self._mock_stream()
+            return
+
+        if not self.llm:
+            raise RuntimeError("LLM model not initialized.")
+
+        params: dict[str, Any] = {
+            "prompt": prompt,
+            "max_tokens": max_tokens or settings.FINAL_LLM_MAX_TOKENS,
+            "temperature": temperature if temperature is not None else settings.FINAL_LLM_TEMPERATURE,
+            "top_p": top_p if top_p is not None else settings.FINAL_LLM_TOP_P,
+            "stream": True,
+        }
+        
+        if top_k is not None:
+            params["top_k"] = top_k
+
+        for chunk in self.llm(**params):
+            token = chunk.get("choices", [{}])[0].get("text", "")
+            if token:
+                yield token
+
+    async def generate_stream_async(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Async wrapper for generate_stream that runs in ThreadPoolExecutor.
+        
+        Args:
+            prompt: Input prompt string
+            temperature: Sampling temperature (default: from settings)
+            top_p: Nucleus sampling parameter (default: from settings)
+            top_k: Top-k sampling parameter (default: None)
+            max_tokens: Maximum tokens to generate (default: from settings)
+            
+        Yields:
+            Individual tokens as they are generated
+        """
+        loop = asyncio.get_event_loop()
+        
+        def _run_sync_generator():
+            """Run the synchronous generator and collect results."""
+            results = []
+            for token in self.generate_stream(
+                prompt=prompt,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                max_tokens=max_tokens,
+            ):
+                results.append(token)
+            return results
+        
+        tokens = await loop.run_in_executor(self._executor, _run_sync_generator)
+        
+        for token in tokens:
+            yield token
+            await asyncio.sleep(0)
+
+    def _mock_stream(self) -> Generator[str, None, None]:
+        """Generate mock tokens for testing streaming functionality."""
+        mock_response = "This is a mock streaming response from the LLM. "
+        mock_response += "It demonstrates token-by-token generation. "
+        mock_response += "Each word is yielded separately with a small delay."
+        
+        words = mock_response.split()
+        for i, word in enumerate(words):
+            time.sleep(0.05)
+            if i < len(words) - 1:
+                yield word + " "
+            else:
+                yield word

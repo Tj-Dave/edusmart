@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import MarkdownMessage from '../markdownMessage';
 import { chatApi } from '../../services/api';
+import { useLLMStream } from '../../hooks/useLLMStream';
 
 interface SessionOption {
   id: string;
@@ -69,6 +70,12 @@ export default function LecturerAssistantPanel({
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [streamingMessageId, setStreamingMessageId] = useState<number | null>(null);
+
+  const { isStreaming, partialText, startStream, abortStream } = useLLMStream({
+    token,
+  });
+  const hasActiveAssistantPlaceholder = streamingMessageId !== null && isSending;
 
   const courseContext = useMemo(() => {
     if (!selectedCourseCode) return null;
@@ -137,7 +144,7 @@ export default function LecturerAssistantPanel({
 
   const sendMessage = async () => {
     const content = inputValue.trim();
-    if (!token || !content || isSending) return;
+    if (!token || !content || isSending || isStreaming) return;
 
     const optimisticMessage: MessageView = {
       role: 'user',
@@ -145,48 +152,86 @@ export default function LecturerAssistantPanel({
       timestamp: new Date().toISOString(),
     };
 
-    setMessages((prev) => [...prev, optimisticMessage]);
+    const placeholderId = -(Date.now() + Math.floor(Math.random() * 1000));
+
+    setMessages((prev) => [...prev, optimisticMessage, {
+      id: placeholderId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toISOString(),
+    }]);
+
     setInputValue('');
     setIsSending(true);
     setError(null);
+    setStreamingMessageId(placeholderId);
 
     try {
-      if (!currentSessionId) {
-        const detail = await chatApi.queryAtomic(token, content, courseContext || null, 500);
-        const sessionId = String(detail?.session?.id || detail?.session?.session_id || '');
-        if (!sessionId) throw new Error('Session was not returned by backend.');
-
-        const detailMessages = parseMessages(detail?.messages || []);
-        setCurrentSessionId(sessionId);
-        setMessages(detailMessages);
-
-        const resolvedTitle = detail?.session?.title || deriveChatTitle(content);
-        setCurrentTitle(resolvedTitle);
-
-        setSessions((prev) => {
-          const filtered = prev.filter((session) => session.id !== sessionId);
-          return [{ id: sessionId, title: resolvedTitle, createdAt: new Date().toISOString() }, ...filtered];
-        });
-      } else {
-        const response = await chatApi.sendMessage(token, currentSessionId, content);
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: response?.message_id,
-            role: 'assistant',
-            content: response?.response || 'No response received.',
-            timestamp: new Date().toISOString(),
-          },
-        ]);
-      }
+      await startStream({
+        message: content,
+        courseId: courseContext || undefined,
+        sessionId: currentSessionId,
+        onSessionCreated: (newSessionId, title) => {
+          setCurrentSessionId(newSessionId);
+          const chatTitle = title || deriveChatTitle(content);
+          setCurrentTitle(chatTitle);
+          setSessions((prev) => [
+            { id: newSessionId, title: chatTitle, createdAt: new Date().toISOString() },
+            ...prev,
+          ]);
+        },
+        onDone: (fullResponse, sessionId) => {
+          setMessages((prev) => prev.map((msg) =>
+            msg.id === placeholderId
+              ? { ...msg, content: fullResponse, timestamp: new Date().toISOString() }
+              : msg
+          ));
+          setStreamingMessageId(null);
+          setCurrentSessionId(sessionId);
+          setIsSending(false);
+        },
+        onError: (errorMsg, partialResponse) => {
+          setError(errorMsg);
+          if (partialResponse) {
+            setMessages((prev) => prev.map((msg) =>
+              msg.id === placeholderId
+                ? { ...msg, content: partialResponse + '\n\n_[Stream interrupted]_' }
+                : msg
+            ));
+          } else {
+            setMessages((prev) => prev.filter((msg) => msg.id !== placeholderId));
+            setInputValue(content);
+          }
+          setStreamingMessageId(null);
+          setIsSending(false);
+        },
+      });
     } catch (requestError: any) {
       setError(requestError?.message || 'Message failed. Please try again.');
-      setMessages((prev) => prev.slice(0, -1));
+      setMessages((prev) => prev.filter((msg) => msg.id !== placeholderId));
       setInputValue(content);
-    } finally {
+      setStreamingMessageId(null);
       setIsSending(false);
     }
+  };
+
+  const handleStopGenerating = () => {
+    const activeMessageId = streamingMessageId;
+    if (activeMessageId === null) return;
+
+    abortStream();
+    setMessages((prev) => {
+      if (partialText.trim().length === 0) {
+        return prev.filter((msg) => msg.id !== activeMessageId);
+      }
+      return prev.map((msg) =>
+        msg.id === activeMessageId
+          ? { ...msg, content: `${partialText}\n\n_[Stream interrupted]_`, timestamp: new Date().toISOString() }
+          : msg
+      );
+    });
+    setStreamingMessageId(null);
+    setIsSending(false);
   };
 
   return (
@@ -251,22 +296,38 @@ export default function LecturerAssistantPanel({
                 </p>
               </div>
             ) : (
-              messages.map((message, index) => (
+              messages.map((message, index) => {
+                const isStreamingMsg = message.id === streamingMessageId;
+                const displayContent = isStreamingMsg ? partialText : message.content;
+                const hasStreamingTokens = isStreamingMsg && displayContent.trim().length > 0;
+                
+                return (
                 <div
                   key={`${message.id || index}-${message.timestamp || ''}`}
                   className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
                 >
                   <div
-                    className={`max-w-[90%] rounded-2xl px-4 py-2 text-sm ${
+                    className={`max-w-[90%] rounded-2xl px-4 py-2 text-sm transition-all duration-200 ${
                       message.role === 'user'
                         ? 'bg-blue-600 text-white'
+                        : hasStreamingTokens
+                        ? 'border-l-4 border-blue-500 bg-blue-50 text-gray-800'
                         : 'border border-gray-200 bg-gray-50 text-gray-800'
                     }`}
                   >
-                    <MarkdownMessage content={message.content} />
+                    {isStreamingMsg && !displayContent ? (
+                      <div className="flex gap-1 py-1">
+                        <div className="w-1.5 h-1.5 bg-blue-600 rounded-full animate-bounce"></div>
+                        <div className="w-1.5 h-1.5 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                        <div className="w-1.5 h-1.5 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                      </div>
+                    ) : (
+                      <MarkdownMessage content={displayContent} />
+                    )}
                   </div>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
 
@@ -290,13 +351,22 @@ export default function LecturerAssistantPanel({
               placeholder="Ask the assistant..."
               className="min-h-[48px] flex-1 resize-none rounded-2xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
             />
+            {hasActiveAssistantPlaceholder && (
+              <button
+                type="button"
+                onClick={handleStopGenerating}
+                className="rounded-2xl bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-500"
+              >
+                Stop
+              </button>
+            )}
             <button
               type="button"
               onClick={sendMessage}
-              disabled={isSending || !inputValue.trim()}
+              disabled={isSending || isStreaming || !inputValue.trim()}
               className="rounded-2xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isSending ? 'Sending...' : 'Send'}
+              {isSending || isStreaming ? 'Sending...' : 'Send'}
             </button>
           </div>
         </div>
