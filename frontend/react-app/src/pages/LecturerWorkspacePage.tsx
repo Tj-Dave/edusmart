@@ -152,6 +152,7 @@ interface TaskDraft {
 }
 
 type LecturerTab = 'dashboard' | 'offerings' | 'roadmap' | 'students' | 'assessments' | 'uploads' | 'assistant';
+type IngestionMode = 'standard' | 'harag';
 
 const BASE_TABS: Array<{ id: LecturerTab; label: string }> = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -748,7 +749,8 @@ export default function LecturerWorkspacePage() {
   const [uploadHistoryLoading, setUploadHistoryLoading] = useState(false);
   const [uploadHistoryError, setUploadHistoryError] = useState<string | null>(null);
   const [uploadHistory, setUploadHistory] = useState<any[]>([]);
-  const [recentUploads, setRecentUploads] = useState<Array<{ id: string; fileName: string; uploadedAt: string; offeringId?: string }>>([]);
+  const [uploadIngestionMode, setUploadIngestionMode] = useState<IngestionMode>('standard');
+  const [recentUploads, setRecentUploads] = useState<Array<{ id: string; fileName: string; uploadedAt: string; offeringId?: string; ingestionMode?: IngestionMode }>>([]);
 
   const selectedOffering = useMemo(
     () => offerings.find((offering) => offering.id === selectedOfferingId) || null,
@@ -1847,16 +1849,25 @@ export default function LecturerWorkspacePage() {
     setUploadMessage(null);
 
     try {
-      const response = await ingestionApi.uploadDocument(token, uploadFile, selectedOffering.courseCode);
+      const response = await ingestionApi.uploadDocument(token, uploadFile, selectedOffering.courseCode, {
+        courseOfferingId: selectedOfferingId,
+        ingestionMode: uploadIngestionMode,
+      });
       const id = response?.document_id || response?.id || uploadFile.name;
+      const modeLabel = response?.ingestion_mode === 'harag' ? 'HA-RAG' : 'Standard RAG';
+      const vectorCount = response?.ingestion_mode === 'harag'
+        ? response?.harag_stored_vectors ?? response?.stored_vectors
+        : response?.standard_stored_vectors ?? response?.stored_vectors;
+      const summary = typeof vectorCount === 'number' ? ` • ${vectorCount} indexed chunk${vectorCount === 1 ? '' : 's'}` : '';
 
-      setUploadMessage(`Uploaded ${uploadFile.name} (${id}).`);
+      setUploadMessage(`Uploaded ${uploadFile.name} (${id}) using ${modeLabel}${summary}.`);
       setRecentUploads((prev) => [
         {
           id: String(id),
           fileName: uploadFile.name,
           uploadedAt: new Date().toISOString(),
           offeringId: selectedOfferingId || undefined,
+          ingestionMode: response?.ingestion_mode || uploadIngestionMode,
         },
         ...prev,
       ]);
@@ -3070,6 +3081,28 @@ export default function LecturerWorkspacePage() {
                   Select a course to upload materials
                 </div>
               )}
+              <div className="mb-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Ingestion mode</div>
+                <div className="inline-flex rounded-2xl border border-gray-200 bg-white p-1 text-sm font-semibold text-gray-600">
+                  <button
+                    type="button"
+                    onClick={() => setUploadIngestionMode('standard')}
+                    className={`rounded-xl px-4 py-2 transition ${uploadIngestionMode === 'standard' ? 'bg-gray-900 text-white shadow-sm' : 'hover:bg-gray-50'}`}
+                    aria-pressed={uploadIngestionMode === 'standard'}
+                  >
+                    Standard RAG
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUploadIngestionMode('harag')}
+                    className={`rounded-xl px-4 py-2 transition ${uploadIngestionMode === 'harag' ? 'bg-blue-600 text-white shadow-sm' : 'hover:bg-gray-50'}`}
+                    aria-pressed={uploadIngestionMode === 'harag'}
+                  >
+                    HA-RAG
+                  </button>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
                 <label className={`flex items-center justify-center rounded-2xl border border-dashed px-4 py-4 text-sm ${
                   uploadContextReady
@@ -3095,7 +3128,7 @@ export default function LecturerWorkspacePage() {
               </div>
               {selectedOffering && (
                 <p className="mt-2 text-xs text-gray-500">
-                  Active offering context: {selectedOffering.courseCode} • {selectedOffering.term} {selectedOffering.year || ''}
+                  Active offering context: {selectedOffering.courseCode} • {selectedOffering.term} {selectedOffering.year || ''} • {uploadIngestionMode === 'harag' ? 'HA-RAG hierarchy' : 'Standard RAG chunks'}
                 </p>
               )}
             </SectionCard>
@@ -3121,7 +3154,10 @@ export default function LecturerWorkspacePage() {
                 {uploadContextReady && recentUploadsForContext.map((upload) => (
                   <div key={`recent-${upload.id}-${upload.uploadedAt}`} className="rounded-2xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
                     <p className="font-semibold text-blue-800">{upload.fileName}</p>
-                    <p className="text-xs text-blue-700">Document ID: {upload.id} • {new Date(upload.uploadedAt).toLocaleString()}</p>
+                    <p className="text-xs text-blue-700">
+                      Document ID: {upload.id} • {new Date(upload.uploadedAt).toLocaleString()}
+                      {upload.ingestionMode ? ` • ${upload.ingestionMode === 'harag' ? 'HA-RAG' : 'Standard RAG'}` : ''}
+                    </p>
                   </div>
                 ))}
 
@@ -3131,6 +3167,7 @@ export default function LecturerWorkspacePage() {
                     <p className="text-xs text-gray-500">
                       {upload?.course_code || selectedOffering?.courseCode || 'N/A'}
                       {upload?.uploaded_at ? ` • ${new Date(upload.uploaded_at).toLocaleString()}` : ''}
+                      {upload?.ingestion_mode ? ` • ${upload.ingestion_mode === 'harag' ? 'HA-RAG' : 'Standard RAG'}` : ''}
                     </p>
                   </div>
                 ))}

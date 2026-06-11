@@ -13,6 +13,7 @@ from app.services.embedder.e5_embedder import E5Embedder
 from app.services.competency_mapper import CompetencyMapper
 from app.services.bloom_detector import BloomDetector
 from app.services.rag_engine import RAGEngine
+from app.services.harag import HARAGRetrievalOrchestrator
 from app.db.vector_store import VectorStore
 from app.services.memory.memory_manager import MemoryManagerPG
 from app.services.logging.pipeline_logger import PipelineLogger
@@ -55,6 +56,7 @@ embedder = E5Embedder(device="cpu")
 competency_mapper = CompetencyMapper(embedder)
 bloom_detector = BloomDetector()
 rag_engine = RAGEngine(vector_store=vector_store, embedder=embedder)
+harag_retriever = HARAGRetrievalOrchestrator(embedder=embedder)
 
 memory_manager = MemoryManagerPG(
     vector_store=vector_store,
@@ -76,6 +78,7 @@ app.state.embedder = embedder
 app.state.competency_mapper = competency_mapper
 app.state.bloom_detector = bloom_detector
 app.state.rag_engine = rag_engine
+app.state.harag_retriever = harag_retriever
 app.state.memory_manager = memory_manager
 app.state.pipeline_logger = pipeline_logger
 

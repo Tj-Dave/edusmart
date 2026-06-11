@@ -176,6 +176,7 @@ class ChatStreamRequest(BaseModel):
     topic_id: Optional[str] = None
     session_id: Optional[str] = None
     attachments: Optional[list] = None
+    retrieval_mode: Optional[str] = None
 
 
 @router.post("", response_model=ChatSessionOut)
@@ -292,6 +293,7 @@ async def chat_stream(
             user_id=user_id,
             session_id=session_uuid,
             course_id=course_code,
+            retrieval_mode=payload.retrieval_mode,
         ):
             yield {"data": json.dumps(event_data)}
 
@@ -310,6 +312,7 @@ async def chat_stream(
 async def send_message(
     session_id: UUID,
     content: str = Form(...),
+    retrieval_mode: Optional[str] = Form(default=None),
     req: Request = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -323,6 +326,7 @@ async def send_message(
         db=db,
         user_id=str(current_user.id),
         session_id=session_id,
+        retrieval_mode=retrieval_mode,
     )
 
 # =========================
@@ -389,6 +393,7 @@ async def chat_query_atomic(
             db=db,
             user_id=str(current_user.id),
             session_id=created_session.id,
+            retrieval_mode=payload.retrieval_mode,
         )
 
         # 3) Load session + messages from DB (UI hydration)
@@ -411,6 +416,7 @@ async def chat_query_atomic(
             "response": getattr(pipeline_result, "response", "") or "",
             "citations": getattr(pipeline_result, "citations", []) or [],
             "message_id": assistant_message_id,
+            "dev_trace": getattr(pipeline_result, "dev_trace", None),
         }
 
     except HTTPException:

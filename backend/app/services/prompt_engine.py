@@ -1,4 +1,5 @@
 from typing import List, Dict
+from typing import Any
 
 class PromptEngine:
     """Builds structured prompts for LLM based on pedagogical context"""
@@ -35,6 +36,63 @@ Provide a clear, pedagogically sound response that:
 Do not Justify your response and how it links to the bloom level and competencies. Focus on providing a helpful, student-friendly answer that fosters learning and curiosity without directly answering the question.
 
 Response:"""
+
+    @staticmethod
+    def build_harag_prompt(
+        *,
+        query: str,
+        bloom_level: str,
+        competency: List[Dict] | None,
+        harag_package: Any,
+        memory: str,
+    ) -> tuple[str, dict]:
+        """Build a structured prompt from the HA-RAG retrieval package."""
+        comp_text = PromptEngine._format_competencies(competency or [])
+        summaries = getattr(harag_package, "summaries", []) or []
+        parents = getattr(harag_package, "parents", []) or []
+
+        summary_lines = []
+        for idx, summary in enumerate(summaries[:4], start=1):
+            summary_lines.append(f"S{idx}. {summary.h1_title}: {summary.summary_text}")
+
+        evidence_lines = []
+        citation_lines = []
+        for idx, parent in enumerate(parents[:4], start=1):
+            anchor = parent.citation_anchor or {}
+            title = anchor.get("title") or anchor.get("h1") or f"Parent {idx}"
+            evidence_lines.append(f"P{idx} [{title}]\n{parent.text}")
+            citation_lines.append(
+                f"P{idx}: document={parent.document_id}, parent={parent.parent_id}, heading={title}, score={parent.score}"
+            )
+
+        mem_text = f"\nPrevious conversation context:\n{memory[:800]}" if memory and memory.strip() else ""
+        prompt = f"""You are EduScape AI, an AI education assistant aligned with Uganda's Competency-Based Curriculum (CBC).
+
+Bloom task: {PromptEngine._get_bloom_instruction(bloom_level)}
+CBC competencies: {comp_text}
+
+H1 summary context:
+{chr(10).join(summary_lines) if summary_lines else "No H1 summaries retrieved."}
+
+Parent chunk evidence:
+{chr(10).join(evidence_lines) if evidence_lines else "No lecturer document evidence retrieved."}
+
+Citation anchors:
+{chr(10).join(citation_lines) if citation_lines else "No citation anchors available."}{mem_text}
+
+Student query:
+{query}
+
+Respond in a student-friendly way. Use the parent chunk evidence as the grounding source when it is relevant. Guide the student with explanations, hints, and practical examples instead of simply giving a bare answer. If the evidence is insufficient, say what is missing rather than inventing details.
+
+Response:"""
+        trace = {
+            "summary_count": len(summaries),
+            "parent_count": len(parents),
+            "citation_anchors": citation_lines,
+            "prompt_preview": prompt[:2000],
+        }
+        return prompt, trace
     
     @staticmethod
     def _format_competencies(competency: List[Dict]) -> str:

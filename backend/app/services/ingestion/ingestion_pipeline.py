@@ -29,6 +29,8 @@ from app.db.vector_store import VectorStore
 # NEW: metadata registry (Postgres) for stable document IDs
 from app.db import metadata_store
 from app.db.models import IngestionStatus
+from app.services.harag import HARAGIngestionOrchestrator
+from app.services.harag.storage_service import HARAGStorageService
 
 logger = structlog.get_logger()
 
@@ -40,7 +42,10 @@ class IngestionResult(BaseModel):
     document_id: str
     status: Literal["success", "partial_success", "failed"]
 
+    ingestion_mode: Literal["standard", "harag"] = "standard"
     stored_vectors: int = 0
+    standard_stored_vectors: int = 0
+    harag_stored_vectors: int = 0
     ocr_ingested_chunks: int = 0
     warnings: list[str] = []
 
@@ -56,7 +61,7 @@ class IngestionPipeline:
     - update Postgres metadata registry for stable document_id + status (if db passed)
     """
 
-    def __init__(self):
+    def __init__(self, llm_subclient=None):
         logger.info("initializing_pipeline")
         self.loader = DocumentLoader()
 
@@ -71,6 +76,11 @@ class IngestionPipeline:
 
         self.ocr_engine = OCREngine()
         self.vector_store = VectorStore()
+        self.harag_ingestor = HARAGIngestionOrchestrator(
+            embedder=self.embedder,
+            llm_subclient=llm_subclient,
+            embedding_model="intfloat/e5-base-v2",
+        )
         logger.info("pipeline_ready")
 
     def ingest(
@@ -86,6 +96,9 @@ class IngestionPipeline:
         db: Optional[Session] = None,
         mime_type: Optional[str] = None,
         storage_path: Optional[str] = None,
+        course_offering_id: Optional[str] = None,
+        source_scope: str = "offering_only",
+        ingestion_mode: Literal["standard", "harag"] = "standard",
     ) -> IngestionResult:
         """
         Runs the full ingestion pipeline for a document into the collection for the given course.
@@ -108,6 +121,8 @@ class IngestionPipeline:
             IngestionResult
         """
         file_path = file_path.resolve()
+        if ingestion_mode not in {"standard", "harag"}:
+            raise ValueError("ingestion_mode must be 'standard' or 'harag'")
         collection = self.vector_store.course_collection_name(course_id)
         warnings: list[str] = []
 
@@ -118,6 +133,8 @@ class IngestionPipeline:
             doc_row, _created = metadata_store.get_or_create_document(
                 db,
                 course_id=course_id,
+                course_offering_id=course_offering_id,
+                source_scope=source_scope,
                 uploader_user_id=uploader_user_id,
                 file_path=file_path,
                 mime_type=mime_type,
@@ -148,13 +165,39 @@ class IngestionPipeline:
                 "source": file_path.name,
                 "document_id": document_id,
                 "course_id": course_id,
+                "course_code": course_id,
+                "course_offering_id": course_offering_id,
                 "uploader_user_id": uploader_user_id,
                 "uploader_role": uploader_role,
+                "ingestion_mode": ingestion_mode,
             }
             if course_meta:
                 base_meta.update(course_meta)
             if extra_meta:
                 base_meta.update(extra_meta)
+
+            harag_stored_vectors = 0
+            if ingestion_mode == "standard" and db is not None:
+                HARAGStorageService(db).delete_document_hierarchy(document_id)
+            if ingestion_mode == "harag":
+                self.vector_store.delete_document(collection=collection, document_id=document_id)
+            if ingestion_mode == "harag" and db is not None and text.strip():
+                logger.info("harag_ingestion_started", document_id=document_id, course_id=course_id)
+                harag_stored_vectors = self.harag_ingestor.ingest_text(
+                    db,
+                    document_id=document_id,
+                    text=text,
+                    course_code=course_id,
+                    course_offering_id=course_offering_id,
+                    source_scope=source_scope,
+                    metadata={
+                        "ingestion_mode": "harag",
+                        "original_filename": file_path.name,
+                        "uploader_user_id": uploader_user_id,
+                        "uploader_role": uploader_role,
+                    },
+                )
+                logger.info("harag_ingestion_completed", document_id=document_id, child_vectors=harag_stored_vectors)
 
             # If replace mode: delete all vectors for this doc_id in this course collection
             if reingest_mode == "replace":
@@ -169,7 +212,7 @@ class IngestionPipeline:
             stored_vectors = 0
 
             # Step 3: Embed + store text chunks
-            if chunks:
+            if ingestion_mode == "standard" and chunks:
                 texts = [c.chunk_text for c in chunks]
                 metadatas: list[dict] = []
                 ids: list[str] = []
@@ -220,8 +263,12 @@ class IngestionPipeline:
             ocr_pending_count = 0
             ocr_ingested_chunks = 0
 
-            logger.info("processing_images", image_count=len(images))
+            logger.info("processing_images", image_count=len(images), ingestion_mode=ingestion_mode)
+            if ingestion_mode == "harag" and images:
+                warnings.append("OCR image chunks were skipped for HA-RAG ingestion.")
             for img_i, image_path in enumerate(images):
+                if ingestion_mode != "standard":
+                    continue
                 ocr_result = self.ocr_engine.process_image(image_path)
 
                 status = getattr(ocr_result, "status", None)
@@ -312,7 +359,10 @@ class IngestionPipeline:
                 "ingestion_completed",
                 document_id=document_id,
                 total_chunks=len(chunks),
-                stored_vectors=stored_vectors,
+                ingestion_mode=ingestion_mode,
+                stored_vectors=harag_stored_vectors if ingestion_mode == "harag" else stored_vectors,
+                standard_stored_vectors=stored_vectors,
+                harag_stored_vectors=harag_stored_vectors,
                 ocr_pending=ocr_pending_count,
                 ocr_ingested_chunks=ocr_ingested_chunks,
                 status=status_out,
@@ -323,8 +373,8 @@ class IngestionPipeline:
                 metadata_store.update_counts(
                     db,
                     document_id=document_id,
-                    total_chunks=len(chunks),
-                    stored_vectors=stored_vectors,
+                    total_chunks=harag_stored_vectors if ingestion_mode == "harag" else len(chunks),
+                    stored_vectors=harag_stored_vectors if ingestion_mode == "harag" else stored_vectors,
                     processed_images=len(images),
                     ocr_pending=ocr_pending_count,
                     ocr_ingested_chunks=ocr_ingested_chunks,
@@ -337,12 +387,15 @@ class IngestionPipeline:
                 )
 
             return IngestionResult(
-                total_chunks=len(chunks),
+                total_chunks=harag_stored_vectors if ingestion_mode == "harag" else len(chunks),
                 processed_images=len(images),
                 ocr_pending=ocr_pending_count,
                 document_id=document_id,
                 status=status_out,
-                stored_vectors=stored_vectors,
+                ingestion_mode=ingestion_mode,
+                stored_vectors=harag_stored_vectors if ingestion_mode == "harag" else stored_vectors,
+                standard_stored_vectors=stored_vectors,
+                harag_stored_vectors=harag_stored_vectors,
                 ocr_ingested_chunks=ocr_ingested_chunks,
                 warnings=warnings,
             )
@@ -359,7 +412,10 @@ class IngestionPipeline:
                 ocr_pending=0,
                 document_id=document_id,
                 status="failed",
+                ingestion_mode=ingestion_mode,
                 stored_vectors=0,
+                standard_stored_vectors=0,
+                harag_stored_vectors=0,
                 ocr_ingested_chunks=0,
                 warnings=[str(e)],
             )

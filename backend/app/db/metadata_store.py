@@ -28,6 +28,8 @@ def get_or_create_document(
     course_id: str,
     uploader_user_id: str,
     file_path: Path,
+    course_offering_id: Optional[str] = None,
+    source_scope: str = "offering_only",
     mime_type: Optional[str] = None,
     storage_path: Optional[str] = None,
 ) -> Tuple[IngestedDocument, bool]:
@@ -41,6 +43,7 @@ def get_or_create_document(
 
     stmt = select(IngestedDocument).where(
         IngestedDocument.course_id == course_id,
+        IngestedDocument.course_offering_id == course_offering_id,
         IngestedDocument.uploader_user_id == uploader_user_id,
         IngestedDocument.file_hash == file_hash,
     )
@@ -51,6 +54,7 @@ def get_or_create_document(
         existing.size_bytes = size_bytes
         existing.mime_type = mime_type
         existing.storage_path = storage_path
+        existing.source_scope = source_scope
         db.add(existing)
         db.commit()
         db.refresh(existing)
@@ -58,12 +62,14 @@ def get_or_create_document(
 
     doc = IngestedDocument(
         course_id=course_id,
+        course_offering_id=course_offering_id,
         uploader_user_id=uploader_user_id,
         original_filename=file_path.name,
         file_hash=file_hash,
         size_bytes=size_bytes,
         mime_type=mime_type,
         storage_path=storage_path,
+        source_scope=source_scope,
         status=IngestionStatus.queued,
     )
     db.add(doc)

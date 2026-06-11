@@ -634,6 +634,20 @@ class IngestedDocument(Base):
         index=True,
     )
 
+    course_offering_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("course_offerings.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    source_scope: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default="offering_only",
+        index=True,
+    )
+
     original_filename: Mapped[str] = mapped_column(Text, nullable=False)
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # sha256 hex
     size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -661,11 +675,314 @@ class IngestedDocument(Base):
 
     uploader: Mapped["User"] = relationship()
     course: Mapped["Course"] = relationship()
+    course_offering: Mapped[Optional["CourseOffering"]] = relationship()
 
     __table_args__ = (
-        UniqueConstraint("course_id", "uploader_user_id", "file_hash", name="uq_ingested_doc_course_uploader_hash"),
+        UniqueConstraint(
+            "course_id",
+            "course_offering_id",
+            "uploader_user_id",
+            "file_hash",
+            name="uq_ingested_doc_course_offering_uploader_hash",
+        ),
         Index("idx_ingested_documents_course_id", "course_id"),
+        CheckConstraint(
+            "source_scope IN ('offering_only','course_shared_pending','course_shared_approved','course_shared_rejected')",
+            name="ingested_documents_source_scope_valid",
+        ),
     )
+
+
+# -----------------------------
+# HA-RAG V1 hierarchy and observability
+# -----------------------------
+class DocumentSection(Base):
+    __tablename__ = "document_sections"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ingested_documents.document_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    course_offering_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    course_code: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    heading_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    heading_text: Mapped[str] = mapped_column(Text, nullable=False)
+    heading_lineage: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    section_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    char_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}", name="metadata")
+    source_scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="offering_only", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    document: Mapped["IngestedDocument"] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("heading_level >= 1", name="document_sections_heading_level_positive"),
+        Index("idx_document_sections_doc_order", "document_id", "section_order"),
+    )
+
+
+class H1Summary(Base):
+    __tablename__ = "h1_summaries"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ingested_documents.document_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    section_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_sections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    course_offering_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    course_code: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    h1_title: Mapped[str] = mapped_column(Text, nullable=False)
+    summary_text: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    source_scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="offering_only", index=True)
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}", name="metadata")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    document: Mapped["IngestedDocument"] = relationship()
+    section: Mapped["DocumentSection"] = relationship()
+
+
+class ParentChunk(Base):
+    __tablename__ = "parent_chunks"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ingested_documents.document_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    summary_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("h1_summaries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    section_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_sections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    course_offering_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    course_code: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    chunk_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    heading_lineage: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    citation_anchor: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    char_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    source_scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="offering_only", index=True)
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}", name="metadata")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    document: Mapped["IngestedDocument"] = relationship()
+    summary: Mapped["H1Summary"] = relationship()
+    section: Mapped["DocumentSection"] = relationship()
+
+    __table_args__ = (
+        Index("idx_parent_chunks_doc_order", "document_id", "chunk_order"),
+    )
+
+
+class ChildChunk(Base):
+    __tablename__ = "child_chunks"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ingested_documents.document_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    parent_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("parent_chunks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    summary_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("h1_summaries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    course_offering_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    course_code: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    chunk_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    overlap_prev_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    heading_lineage: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    char_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    source_scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="offering_only", index=True)
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}", name="metadata")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    document: Mapped["IngestedDocument"] = relationship()
+    parent: Mapped["ParentChunk"] = relationship()
+    summary: Mapped["H1Summary"] = relationship()
+
+    __table_args__ = (
+        Index("idx_child_chunks_doc_order", "document_id", "chunk_order"),
+        Index("idx_child_chunks_scope", "course_code", "course_offering_id", "source_scope"),
+    )
+
+
+class ChildChunkEmbedding(Base):
+    __tablename__ = "child_chunk_embeddings"
+
+    child_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("child_chunks.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    embedding_json: Mapped[list] = mapped_column(JSONB, nullable=False)
+    embedding_model: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    child: Mapped["ChildChunk"] = relationship()
+
+
+class ExtractedEntity(Base):
+    __tablename__ = "extracted_entities"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("ingested_documents.document_id", ondelete="CASCADE"), nullable=False, index=True)
+    child_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("child_chunks.id", ondelete="CASCADE"), nullable=False, index=True)
+    course_offering_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    course_code: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="concept")
+    confidence: Mapped[Optional[float]] = mapped_column(Numeric(5, 4), nullable=True)
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}", name="metadata")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ExtractedRelationship(Base):
+    __tablename__ = "extracted_relationships"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("ingested_documents.document_id", ondelete="CASCADE"), nullable=False, index=True)
+    child_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("child_chunks.id", ondelete="CASCADE"), nullable=False, index=True)
+    course_offering_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    course_code: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    predicate: Mapped[str] = mapped_column(Text, nullable=False)
+    object: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_text: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[Optional[float]] = mapped_column(Numeric(5, 4), nullable=True)
+    extraction_method: Mapped[str] = mapped_column(Text, nullable=False, server_default="local_llm")
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}", name="metadata")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_extracted_relationships_lookup", "course_code", "course_offering_id"),
+    )
+
+
+class DocumentSharingRequest(Base):
+    __tablename__ = "document_sharing_requests"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("ingested_documents.document_id", ondelete="CASCADE"), nullable=False, index=True)
+    course_offering_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("course_offerings.id", ondelete="SET NULL"), nullable=True, index=True)
+    course_code: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    requested_by_user_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    reviewed_by_user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending", index=True)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    review_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    document: Mapped["IngestedDocument"] = relationship()
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending','approved','rejected')", name="document_sharing_requests_status_valid"),
+    )
+
+
+class RetrievalRun(Base):
+    __tablename__ = "retrieval_runs"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    query_text: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    session_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    course_offering_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    course_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True, index=True)
+    triggered: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    channel_weights: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    trace_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class RetrievalEvidence(Base):
+    __tablename__ = "retrieval_evidence"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    retrieval_run_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("retrieval_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    child_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("child_chunks.id", ondelete="SET NULL"), nullable=True, index=True)
+    parent_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("parent_chunks.id", ondelete="SET NULL"), nullable=True, index=True)
+    summary_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("h1_summaries.id", ondelete="SET NULL"), nullable=True, index=True)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[Optional[float]] = mapped_column(Numeric(10, 6), nullable=True)
+    meta: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}", name="metadata")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class GroundingCheck(Base):
+    __tablename__ = "grounding_checks"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    retrieval_run_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("retrieval_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
+    answer_text: Mapped[str] = mapped_column(Text, nullable=False)
+    supported_claims: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    unsupported_claims: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    coverage_score: Mapped[Optional[float]] = mapped_column(Numeric(6, 5), nullable=True)
+    diagnostics: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class RetrievalEvalSet(Base):
+    __tablename__ = "retrieval_eval_sets"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    course_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True, index=True)
+    dataset_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class RetrievalEvalResult(Base):
+    __tablename__ = "retrieval_eval_results"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    eval_set_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=True), ForeignKey("retrieval_eval_sets.id", ondelete="SET NULL"), nullable=True, index=True)
+    metrics_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    result_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 # -------------------------------------------------------------------
 # Curriculum Spec + Roadmap + Assessments + Progress Tracking (NEW)

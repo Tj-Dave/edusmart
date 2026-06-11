@@ -21,6 +21,152 @@ import type {
   StudentWorkspaceProps,
 } from './types';
 
+type RetrievalMode = 'standard' | 'harag';
+
+const DEV_MODE_STORAGE_KEY = 'edusmart_dev_mode';
+const RETRIEVAL_MODE_STORAGE_KEY = 'edusmart_retrieval_mode';
+
+const readStoredDevMode = () =>
+  typeof window !== 'undefined' ? window.localStorage.getItem(DEV_MODE_STORAGE_KEY) === 'true' : false;
+
+const readStoredRetrievalMode = (): RetrievalMode => {
+  if (typeof window === 'undefined') return 'harag';
+  return window.localStorage.getItem(RETRIEVAL_MODE_STORAGE_KEY) === 'standard' ? 'standard' : 'harag';
+};
+
+const formatMs = (value: unknown) => {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) ? `${numeric.toFixed(1)} ms` : 'Not available';
+};
+
+function DevJsonBlock({ value }: { value: unknown }) {
+  if (value === undefined || value === null || value === '') {
+    return <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-500">Not available</div>;
+  }
+  return (
+    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-[11px] leading-relaxed text-slate-700">
+      {typeof value === 'string' ? value : JSON.stringify(value, null, 2)}
+    </pre>
+  );
+}
+
+function DevDiagnosticsPanel({
+  trace,
+  retrievalMode,
+  sessionId,
+}: {
+  trace?: any;
+  retrievalMode: RetrievalMode;
+  sessionId?: string | null;
+}) {
+  const metadata = trace?.query_metadata || {};
+  const timing = trace?.timing || {};
+  const rag = trace?.rag || {};
+  const standardChunks = rag?.retrieved_child_chunks || rag?.semantic_child_matches;
+  const haragDetails = {
+    semantic_child_matches: rag?.semantic_child_matches,
+    relationship_child_matches: rag?.relationship_child_matches,
+    aggregated_child_support: rag?.aggregated_child_support || rag?.aggregated_parent_scores,
+    ranked_parent_chunks: rag?.ranked_parent_chunks || rag?.selected_parent_chunks,
+    summary_activation: rag?.summary_activation || rag?.linked_h1_summaries,
+    channel_weights: rag?.channel_weights,
+    selected_evidence_package: rag?.selected_evidence_package,
+  };
+
+  return (
+    <aside className="w-full xl:w-[380px] border-t xl:border-t-0 xl:border-l border-slate-200 bg-slate-50 flex flex-col min-h-[280px] xl:min-h-0">
+      <div className="px-4 py-3 border-b border-slate-200 bg-white">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">Query diagnostics</h2>
+            <div className="text-xs text-slate-500">Mode: {metadata.retrieval_mode || retrievalMode}</div>
+          </div>
+          <span className="rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700">Dev on</span>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs text-slate-700">
+        {!trace && (
+          <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-4 text-slate-500">
+            Send a message to populate diagnostics.
+          </div>
+        )}
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">Query metadata</h3>
+          <dl className="grid grid-cols-[120px_1fr] gap-x-3 gap-y-1">
+            <dt className="text-slate-500">Query</dt>
+            <dd className="break-words">{metadata.user_query || 'Not available'}</dd>
+            <dt className="text-slate-500">Retrieval</dt>
+            <dd>{metadata.retrieval_mode || retrievalMode}</dd>
+            <dt className="text-slate-500">Dev mode</dt>
+            <dd>{String(metadata.dev_mode ?? true)}</dd>
+            <dt className="text-slate-500">Session</dt>
+            <dd className="break-all">{metadata.session_id || sessionId || 'Not available'}</dd>
+          </dl>
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">Timing</h3>
+          <dl className="grid grid-cols-[160px_1fr] gap-x-3 gap-y-1">
+            <dt className="text-slate-500">Total request</dt>
+            <dd>{formatMs(timing.total_request_ms)}</dd>
+            <dt className="text-slate-500">Confidence layer</dt>
+            <dd>{formatMs(timing.confidence_layer_ms)}</dd>
+            <dt className="text-slate-500">Bloom detection</dt>
+            <dd>{formatMs(timing.bloom_detection_ms)}</dd>
+            <dt className="text-slate-500">CBC mapping</dt>
+            <dd>{formatMs(timing.cbc_mapping_ms)}</dd>
+            <dt className="text-slate-500">Retrieval</dt>
+            <dd>{formatMs(timing.retrieval_ms)}</dd>
+            <dt className="text-slate-500">Prompt assembly</dt>
+            <dd>{formatMs(timing.prompt_assembly_ms)}</dd>
+            <dt className="text-slate-500">LLM generation</dt>
+            <dd>{formatMs(timing.llm_generation_ms)}</dd>
+            <dt className="text-slate-500">Frontend trip</dt>
+            <dd>{formatMs(trace?.frontend_timing?.round_trip_ms)}</dd>
+          </dl>
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">Confidence layer</h3>
+          <DevJsonBlock value={trace?.confidence_layer || trace?.confidence_scores} />
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">Bloom detection</h3>
+          <DevJsonBlock value={trace?.bloom} />
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">CBC mapping</h3>
+          <DevJsonBlock value={trace?.cbc} />
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">Retrieval diagnostics</h3>
+          <DevJsonBlock value={(metadata.retrieval_mode || retrievalMode) === 'standard' ? standardChunks : haragDetails} />
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">Prompt diagnostics</h3>
+          <DevJsonBlock value={trace?.prompt_trace} />
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">Grounding and evidence</h3>
+          <DevJsonBlock value={{ grounding: trace?.grounding, evidence: trace?.evidence }} />
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="font-semibold text-slate-900">Warnings and errors</h3>
+          <DevJsonBlock value={{ warnings: trace?.warnings || rag?.warnings, errors: trace?.errors }} />
+        </section>
+      </div>
+    </aside>
+  );
+}
+
 export default function StudentWorkspace({ publicMode = false }: StudentWorkspaceProps = {}) {
   const navigate = useNavigate();
   const { user, logout, token } = useAuth();
@@ -73,6 +219,9 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
   const [showEnrollSuccess, setShowEnrollSuccess] = useState(false);
   const [enrolledCourseInfo, setEnrolledCourseInfo] = useState<any>(null);
   const [pendingCourseSelection, setPendingCourseSelection] = useState<{ code: string; name: string } | null>(null);
+  const [devMode, setDevMode] = useState(readStoredDevMode);
+  const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>(readStoredRetrievalMode);
+  const [latestDevTraceBySession, setLatestDevTraceBySession] = useState<Record<string, any>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
   const courseDropdownRef = useRef<HTMLDivElement>(null);
@@ -88,6 +237,19 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
     token: authToken || '',
   });
   const hasActiveAssistantPlaceholder = streamingMessageId !== null && isLoading;
+  const activeDiagnosticsSessionId = activeSessionId || currentSession?.id || null;
+  const latestMessageDevTrace = [...messages].reverse().find((msg) => msg.role === 'assistant' && msg.devTrace)?.devTrace;
+  const latestDevTrace = activeDiagnosticsSessionId
+    ? latestDevTraceBySession[activeDiagnosticsSessionId] || latestMessageDevTrace
+    : latestMessageDevTrace;
+
+  useEffect(() => {
+    window.localStorage.setItem(DEV_MODE_STORAGE_KEY, devMode ? 'true' : 'false');
+  }, [devMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(RETRIEVAL_MODE_STORAGE_KEY, retrievalMode);
+  }, [retrievalMode]);
 
   useEffect(() => {
     if (isPublicPreview) return;
@@ -321,6 +483,8 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
         message: trimmedMessage,
         courseId: courseCode || undefined,
         sessionId: activeSessionId,
+        devMode,
+        retrievalMode,
         onSessionCreated: (newSessionId, title) => {
           setActiveSessionId(newSessionId);
           setCurrentSession({
@@ -341,12 +505,18 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
           ]);
           setCurrentChatTitle(chatTitle);
         },
-        onDone: (fullResponse, sessionId, citations) => {
+        onDone: (fullResponse, sessionId, citations, devTrace) => {
           setMessages(prev => prev.map((msg) =>
             msg.id === placeholderId
-              ? { ...msg, content: fullResponse, citations, timestamp: new Date().toISOString() }
+              ? { ...msg, content: fullResponse, citations, devTrace, timestamp: new Date().toISOString() }
               : msg
           ));
+          if (devTrace && sessionId) {
+            setLatestDevTraceBySession(prev => ({
+              ...prev,
+              [sessionId]: devTrace,
+            }));
+          }
           setStreamingMessageId(null);
           setActiveSessionId(sessionId);
           setIsLoading(false);
@@ -1003,7 +1173,7 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
               <div className="min-w-0">
                 <p className="text-md uppercase tracking-[0.3em] text-gray-400">{`${activeCourseName}`}</p>
                 <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 truncate">{currentChatTitle}</h1>
-                <p className="text-sm text-gray-500">
+                <div className="text-sm text-gray-500">
                   {!isPublicPreview && (!courseCode || courseCode === 'GENERAL') && (
                     <div className="mt-2 inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       <span>⚠️</span>
@@ -1012,12 +1182,46 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
                       </span>
                     </div>
                   )}
-                </p>
+                </div>
               </div>
             </div>
 
             {/* Header Actions */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="inline-flex rounded-xl border border-gray-200 bg-white p-1 text-xs font-semibold text-gray-600">
+                <button
+                  type="button"
+                  onClick={() => setRetrievalMode('standard')}
+                  className={`px-3 py-1.5 rounded-lg transition ${retrievalMode === 'standard' ? 'bg-gray-900 text-white shadow-sm' : 'hover:bg-gray-50'}`}
+                  aria-pressed={retrievalMode === 'standard'}
+                >
+                  Standard RAG
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRetrievalMode('harag')}
+                  className={`px-3 py-1.5 rounded-lg transition ${retrievalMode === 'harag' ? 'bg-blue-600 text-white shadow-sm' : 'hover:bg-gray-50'}`}
+                  aria-pressed={retrievalMode === 'harag'}
+                >
+                  HA-RAG
+                </button>
+              </div>
+
+              <div className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-600">
+                <span>Dev mode</span>
+                <button
+                  type="button"
+                  onClick={() => setDevMode((value) => !value)}
+                  className={`relative h-5 w-9 rounded-full transition ${devMode ? 'bg-emerald-500' : 'bg-gray-300'}`}
+                  aria-pressed={devMode}
+                  aria-label="Toggle developer diagnostics mode"
+                >
+                  <span
+                    className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition ${devMode ? 'left-4' : 'left-0.5'}`}
+                  />
+                </button>
+              </div>
+
               {!isPublicPreview && canOpenStudentTools && (
                 <button
                   onClick={() => {
@@ -1125,6 +1329,8 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
           />
         )}
 
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col xl:flex-row">
+          <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col">
         {/* Messages Container */}
         <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 sm:px-8 py-8">
           {messages.length === 0 ? (
@@ -1373,6 +1579,16 @@ export default function StudentWorkspace({ publicMode = false }: StudentWorkspac
               )}
             </div>
           </form>
+        </div>
+          </div>
+
+          {devMode && (
+            <DevDiagnosticsPanel
+              trace={latestDevTrace}
+              retrievalMode={retrievalMode}
+              sessionId={activeDiagnosticsSessionId}
+            />
+          )}
         </div>
 
         {/* Switch Course Confirmation Modal */}

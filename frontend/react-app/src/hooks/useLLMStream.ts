@@ -30,6 +30,8 @@ export interface StreamEventDone {
   session_id: string;
   citations?: any[];
   confidence_score?: number;
+  dev_trace?: any;
+  retrieval_mode?: 'standard' | 'harag';
 }
 
 export interface StreamEventError {
@@ -49,8 +51,10 @@ export interface StartStreamParams {
   topicId?: string;
   sessionId?: string | null;
   attachments?: any[];
+  devMode?: boolean;
+  retrievalMode?: 'standard' | 'harag';
   onSessionCreated?: (sessionId: string, title: string) => void;
-  onDone?: (fullResponse: string, sessionId: string, citations?: any[]) => void;
+  onDone?: (fullResponse: string, sessionId: string, citations?: any[], devTrace?: any, retrievalMode?: 'standard' | 'harag') => void;
   onError?: (error: string, partialResponse?: string) => void;
 }
 
@@ -143,6 +147,8 @@ export function useLLMStream({
         topicId,
         sessionId: providedSessionId,
         attachments,
+        devMode,
+        retrievalMode,
         onSessionCreated,
         onDone,
         onError: onErrorCallback,
@@ -163,12 +169,15 @@ export function useLLMStream({
       abortControllerRef.current = controller;
 
       try {
+        const requestStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
         const payload: any = {
           message,
           course_id: courseId || null,
           topic_id: topicId || null,
           session_id: providedSessionId || null,
           attachments: attachments || null,
+          dev_mode: devMode === true,
+          retrieval_mode: retrievalMode || 'harag',
         };
 
         const response = await fetch(`${API_BASE_URL}/chats/stream`, {
@@ -176,6 +185,8 @@ export function useLLMStream({
           headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
+            ...(devMode ? { 'X-EduSmart-Dev-Mode': 'true' } : {}),
+            'X-EduSmart-Retrieval-Mode': retrievalMode || 'harag',
           },
           body: JSON.stringify(payload),
           signal: controller.signal,
@@ -250,7 +261,17 @@ export function useLLMStream({
                     setSessionId(currentSessionId ?? null);
                   }
                   setIsStreaming(false);
-                  onDone?.(fullResponse, currentSessionId || '', data.citations);
+                  const requestFinishedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                  const devTrace = data.dev_trace && typeof data.dev_trace === 'object'
+                    ? {
+                        ...data.dev_trace,
+                        frontend_timing: {
+                          round_trip_ms: requestFinishedAt - requestStartedAt,
+                          display_completed_at: new Date().toISOString(),
+                        },
+                      }
+                    : data.dev_trace;
+                  onDone?.(fullResponse, currentSessionId || '', data.citations, devTrace, data.retrieval_mode);
                 } else if (data.error !== undefined) {
                   // ERROR event
                   setError(data.error);

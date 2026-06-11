@@ -21,6 +21,7 @@ export interface StudentMessage {
   timestamp?: string;
   citations?: Citation[];
   hiddenCitationCount?: number;
+  devTrace?: any;
 }
 
 export interface StudentChatSession {

@@ -5,12 +5,12 @@ from __future__ import annotations
 
 from fastapi.concurrency import run_in_threadpool
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 import mimetypes
 import re
 from uuid import uuid4
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, Body
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -18,7 +18,8 @@ from app.db.postgres import get_db
 
 from app.services.ingestion import IngestionPipeline
 from app.services.auth.deps import get_current_user
-from app.db.models import User
+from app.db.models import DocumentSharingRequest, IngestedDocument, User
+from app.services.harag.storage_service import HARAGStorageService
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
@@ -50,6 +51,8 @@ def _safe_filename(name: str) -> str:
 @router.post("/upload")
 async def upload_document(
     course_id: str = Query(..., description="Course identifier selected from UI"),
+    course_offering_id: Optional[str] = Query(None, description="Active course offering UUID for offering-isolated materials"),
+    ingestion_mode: Literal["standard", "harag"] = Query("standard", description="Retrieval ingestion mode for this upload"),
     file: UploadFile = File(...),
     keep_file: bool = Query(True, description="Keep uploaded file on disk after ingestion"),
     db: Session = Depends(get_db),
@@ -58,8 +61,8 @@ async def upload_document(
     """
     Upload and process an educational document (PDF, DOCX, PPTX).
 
-    Stores vectors into the course collection (course_<course_id>) and
-    writes an ingestion registry row in Postgres (stable document_id).
+    Routes the upload into Standard RAG (Chroma child chunks) or HA-RAG
+    (PostgreSQL hierarchy) and writes an ingestion registry row.
 
     Returns ingestion stats + document_id.
     """
@@ -104,11 +107,14 @@ async def upload_document(
             uploader_user_id=uploader_user_id,
             uploader_role=uploader_role,
             course_meta={"course_id": course_id},
-            extra_meta={"original_filename": file.filename},
+            extra_meta={"original_filename": file.filename, "ingestion_mode": ingestion_mode},
             reingest_mode="upsert",
             db=db,
             mime_type=mime_type,
             storage_path=str(saved_path),
+            course_offering_id=course_offering_id,
+            source_scope="offering_only",
+            ingestion_mode=ingestion_mode,
         )
 
         if not keep_file:
@@ -117,13 +123,17 @@ async def upload_document(
         return {
             "document_id": result.document_id,
             "status": result.status,
+            "ingestion_mode": result.ingestion_mode,
             "total_chunks": result.total_chunks,
             "stored_vectors": getattr(result, "stored_vectors", 0),
+            "standard_stored_vectors": getattr(result, "standard_stored_vectors", 0),
+            "harag_stored_vectors": getattr(result, "harag_stored_vectors", 0),
             "processed_images": result.processed_images,
             "ocr_pending": result.ocr_pending,
             "ocr_ingested_chunks": getattr(result, "ocr_ingested_chunks", 0),
             "warnings": getattr(result, "warnings", []),
             "course_id": course_id,
+            "course_offering_id": course_offering_id,
             "filename": file.filename,
             "saved_path": str(saved_path) if keep_file else None,
         }
@@ -133,3 +143,42 @@ async def upload_document(
     except Exception as e:
         # keep file for debugging unless explicitly asked not to
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+
+
+@router.post("/documents/{document_id}/share-course")
+def request_course_share(
+    document_id: str,
+    rationale: str = Body(default="", embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    doc = db.query(IngestedDocument).filter(IngestedDocument.document_id == document_id).one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if str(doc.uploader_user_id) != str(current_user.id):
+        role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+        if role != "admin":
+            raise HTTPException(status_code=403, detail="Only the uploader or an admin can request sharing")
+
+    existing = (
+        db.query(DocumentSharingRequest)
+        .filter(DocumentSharingRequest.document_id == doc.document_id, DocumentSharingRequest.status == "pending")
+        .one_or_none()
+    )
+    if existing:
+        return {"ok": True, "request_id": str(existing.id), "status": existing.status}
+
+    doc.source_scope = "course_shared_pending"
+    request_row = DocumentSharingRequest(
+        document_id=doc.document_id,
+        course_offering_id=doc.course_offering_id,
+        course_code=doc.course_id,
+        requested_by_user_id=current_user.id,
+        status="pending",
+        rationale=rationale.strip() or None,
+    )
+    db.add(request_row)
+    db.commit()
+    HARAGStorageService(db).update_document_scope(document_id=str(doc.document_id), source_scope="course_shared_pending")
+    db.refresh(request_row)
+    return {"ok": True, "request_id": str(request_row.id), "status": request_row.status}

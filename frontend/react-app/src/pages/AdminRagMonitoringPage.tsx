@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import AdminLayout from '../components/admin/AdminLayout';
-import { RagOverview, adminApi } from '../services/api';
+import { DocumentSharingRequest, RagOverview, adminApi } from '../services/api';
 
 const asNumber = (value: unknown): number => {
   const parsed = Number(value);
@@ -16,13 +16,16 @@ export default function AdminRagMonitoringPage() {
   const [modelName, setModelName] = useState('');
   const [embeddingStrategy, setEmbeddingStrategy] = useState('');
   const [requestRebuild, setRequestRebuild] = useState(false);
+  const [sharingRequests, setSharingRequests] = useState<DocumentSharingRequest[]>([]);
 
   const loadOverview = async () => {
     try {
       setLoading(true);
       setError(null);
       const data = await adminApi.getRagOverview(token);
+      const requests = await adminApi.getDocumentSharingRequests(token, 'pending');
       setOverview(data);
+      setSharingRequests(requests);
       const modelConfig = (data.model_config || {}) as Record<string, unknown>;
       setModelName(String(modelConfig.configured_rag_model_name || ''));
       setEmbeddingStrategy(String(modelConfig.configured_embedding_strategy || ''));
@@ -30,6 +33,23 @@ export default function AdminRagMonitoringPage() {
       setError(requestError?.message || 'Failed to load RAG overview.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const reviewSharingRequest = async (requestId: string, decision: 'approve' | 'reject') => {
+    try {
+      setSaving(true);
+      setError(null);
+      if (decision === 'approve') {
+        await adminApi.approveDocumentSharingRequest(token, requestId);
+      } else {
+        await adminApi.rejectDocumentSharingRequest(token, requestId);
+      }
+      await loadOverview();
+    } catch (requestError: any) {
+      setError(requestError?.message || 'Failed to review sharing request.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -148,6 +168,48 @@ export default function AdminRagMonitoringPage() {
                   {saving ? 'Updating...' : 'Apply RAG Changes'}
                 </button>
               </form>
+            </div>
+          </section>
+
+          <section className="mt-4 rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-base font-semibold text-slate-900">Course Sharing Requests</h2>
+              <span className="text-xs font-medium text-slate-500">{sharingRequests.length} pending</span>
+            </div>
+            <div className="mt-3 divide-y divide-slate-100">
+              {sharingRequests.length === 0 ? (
+                <p className="py-3 text-sm text-slate-500">No pending document sharing requests.</p>
+              ) : (
+                sharingRequests.map((request) => (
+                  <div key={request.id} className="flex flex-col gap-3 py-3 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-slate-900">{request.document?.filename || request.document_id}</p>
+                      <p className="text-xs text-slate-500">
+                        {request.course_code} · {request.document?.source_scope || request.status}
+                      </p>
+                      {request.rationale && <p className="mt-1 text-sm text-slate-600">{request.rationale}</p>}
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={() => void reviewSharingRequest(request.id, 'approve')}
+                        className="rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={() => void reviewSharingRequest(request.id, 'reject')}
+                        className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 disabled:opacity-60"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </section>
         </>

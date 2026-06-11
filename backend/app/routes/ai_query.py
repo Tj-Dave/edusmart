@@ -3,7 +3,7 @@ import asyncio
 import time
 import json
 import re
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Depends, Query
 from fastapi.concurrency import run_in_threadpool
@@ -18,8 +18,11 @@ from app.services.logging.pipeline_logger import StageTimer
 
 from app.db.postgres import get_db
 from app.db import crud_chats
-from app.db.models import MessageRole, User
+from app.db.models import CourseOffering, Enrollment, MessageRole, User
 from app.services.auth.deps import get_current_user
+from app.core.config import settings
+from app.services.harag.grounding_checker import EvidenceGroundingChecker
+from app.services.harag.storage_service import HARAGStorageService
 
 router = APIRouter(prefix="/ai-query", tags=["ai"])
 
@@ -31,6 +34,7 @@ class AIQueryStreamRequest(BaseModel):
     topic_id: Optional[str] = None
     session_id: Optional[str] = None
     attachments: Optional[list] = None
+    retrieval_mode: Optional[str] = None
 
 
 def _format_memory_block(ctx_pack: dict) -> str:
@@ -62,6 +66,120 @@ BLOOM_THRESHOLD = 0.4
 CBC_THRESHOLD = 0.5
 RAG_THRESHOLD = 0.2
 MAX_WORDS_PER_STREAM_EVENT = 3
+
+
+def _dev_mode_enabled(req: Request) -> bool:
+    if not settings.APP_DEBUG:
+        return False
+    header = (req.headers.get("x-edusmart-dev-mode") or req.headers.get("x-dev-mode") or "").lower()
+    query = (req.query_params.get("dev_mode") or "").lower()
+    return header in {"1", "true", "yes", "on"} or query in {"1", "true", "yes", "on"}
+
+
+def _normalize_retrieval_mode(value: Optional[str], *, harag_available: bool) -> str:
+    requested = (value or "").strip().lower()
+    if requested in {"standard", "legacy", "simple"}:
+        return "standard"
+    if requested in {"harag", "ha-rag", "ha_rag", "hierarchical"}:
+        return "harag" if harag_available else "standard"
+    return "harag" if harag_available else "standard"
+
+
+def _resolve_retrieval_mode(req: Request, payload_mode: Optional[str], *, harag_available: bool) -> str:
+    header_mode = req.headers.get("x-edusmart-retrieval-mode") or req.headers.get("x-retrieval-mode")
+    query_mode = req.query_params.get("retrieval_mode")
+    return _normalize_retrieval_mode(payload_mode or header_mode or query_mode, harag_available=harag_available)
+
+
+def _standard_rag_dev_trace(
+    *,
+    retrieved_context: list[dict[str, Any]],
+    course_id: str,
+    rag_gated: bool,
+) -> dict[str, Any]:
+    child_chunks = []
+    for idx, row in enumerate(retrieved_context or []):
+        citation = row.get("citation") or {}
+        text = row.get("text") or row.get("context") or citation.get("snippet") or ""
+        child_chunks.append(
+            {
+                "rank": idx + 1,
+                "chunk_id": row.get("chunk_id") or citation.get("id"),
+                "source_document": citation.get("source") or row.get("source"),
+                "source": citation.get("source") or row.get("source"),
+                "title": citation.get("title"),
+                "score": row.get("score"),
+                "distance": row.get("distance"),
+                "content_type": row.get("content_type") or citation.get("content_type") or "legacy_child_chunk",
+                "page": citation.get("page"),
+                "slide": citation.get("slide"),
+                "content_preview": text[:600],
+            }
+        )
+
+    return {
+        "mode": "standard",
+        "rag_triggered": not rag_gated,
+        "gated": rag_gated,
+        "course_code": course_id,
+        "retrieved_child_chunks": child_chunks,
+        "semantic_child_matches": child_chunks,
+        "relationship_child_matches": [],
+        "aggregated_child_support": [],
+        "ranked_parent_chunks": [],
+        "summary_activation": [],
+        "channel_weights": {"semantic": 1.0, "relationship": 0.0},
+        "selected_evidence_package": {
+            "evidence_count": len(child_chunks),
+            "citations": [row.get("citation") for row in retrieved_context or [] if row.get("citation")],
+        },
+        "warnings": ["Standard RAG uses legacy/simple child-chunk retrieval only; parent fusion and summary activation are disabled."],
+    }
+
+
+def _empty_harag_dev_trace(*, course_id: str, course_offering_id: Optional[str], rag_gated: bool) -> dict[str, Any]:
+    return {
+        "mode": "harag",
+        "rag_triggered": not rag_gated,
+        "gated": rag_gated,
+        "course_code": course_id,
+        "course_offering_id": course_offering_id,
+        "semantic_child_matches": [],
+        "relationship_child_matches": [],
+        "aggregated_parent_scores": [],
+        "linked_h1_summaries": [],
+        "selected_parent_chunks": [],
+        "channel_weights": {},
+        "grounding": {},
+        "retrieval_run_id": None,
+        "warnings": ["HA-RAG retrieval did not run because the RAG confidence gate was closed." if rag_gated else "HA-RAG returned no evidence."],
+    }
+
+
+def _resolve_active_course_offering_id(db: Session, *, user_id: str, course_code: str | None) -> str | None:
+    if not course_code:
+        return None
+    enrollment = (
+        db.query(Enrollment)
+        .join(CourseOffering, CourseOffering.id == Enrollment.offering_id)
+        .filter(
+            Enrollment.user_id == user_id,
+            Enrollment.status == "active",
+            CourseOffering.course_code == course_code,
+            CourseOffering.is_active.is_(True),
+        )
+        .order_by(Enrollment.enrolled_at.desc())
+        .first()
+    )
+    if enrollment:
+        return str(enrollment.offering_id)
+    offering = (
+        db.query(CourseOffering)
+        .filter(CourseOffering.course_code == course_code, CourseOffering.is_active.is_(True))
+        .order_by(CourseOffering.created_at.desc())
+        .first()
+    )
+    return str(offering.id) if offering else None
 
 
 def _split_stream_chunk(text: str, max_words: int = MAX_WORDS_PER_STREAM_EVENT) -> list[str]:
@@ -105,15 +223,23 @@ async def run_ai_pipeline(
     db: Session,
     user_id: str,
     session_id: UUID,
+    retrieval_mode: Optional[str] = None,
 ) -> QueryResponse:
     # Initialize components
     bloom_detector = req.app.state.bloom_detector
     competency_mapper = req.app.state.competency_mapper
     rag_engine = req.app.state.rag_engine
+    harag_retriever = getattr(req.app.state, "harag_retriever", None)
     llm_client = req.app.state.llm_client
     llm_subclient= req.app.state.llm_subclient
     memory_manager = getattr(req.app.state, "memory_manager", None)
     pipeline_logger = getattr(req.app.state, "pipeline_logger", None)
+    dev_mode = _dev_mode_enabled(req)
+    resolved_retrieval_mode = _resolve_retrieval_mode(
+        req,
+        retrieval_mode,
+        harag_available=harag_retriever is not None,
+    )
 
     # Generate trace ID for request tracking
     trace_id = pipeline_logger.generate_trace_id() if pipeline_logger else None
@@ -133,6 +259,7 @@ async def run_ai_pipeline(
                 error_type="ValueError",
             )
         raise HTTPException(status_code=404, detail=str(e))
+    course_offering_id = _resolve_active_course_offering_id(db, user_id=user_id, course_code=course_id)
 
     # Log input stage
     if pipeline_logger:
@@ -204,7 +331,12 @@ async def run_ai_pipeline(
     # 5) competency mapping (gated by confidence)
     with StageTimer() as cbc_timer:
         if confidence_scores["cbc_conf"] > CBC_THRESHOLD:
-            competency = competency_mapper.map(user_query)
+            competency = competency_mapper.map(
+                user_query,
+                db=db,
+                course_offering_id=course_offering_id,
+                course_code=course_id,
+            )
             cbc_gated = False
         else:
             competency = None  # skip competency mapping
@@ -223,11 +355,30 @@ async def run_ai_pipeline(
     # 6) rag retrieve (gated by confidence, course-scoped)
     with StageTimer() as rag_timer:
         if confidence_scores["rag_conf"] > RAG_THRESHOLD:
-            retrieved_context = rag_engine.retrieve_bundle(user_query, course_id=course_id)
-            context_chunks = [row.get("context", "") for row in retrieved_context]
-            citations = [row.get("citation", {}) for row in retrieved_context if row.get("citation")]
+            harag_package = None
+            if resolved_retrieval_mode == "harag" and harag_retriever is not None:
+                harag_package = harag_retriever.retrieve(
+                    db,
+                    query=user_query,
+                    course_code=course_id,
+                    course_offering_id=course_offering_id,
+                    user_id=user_id,
+                    session_id=str(session_id),
+                    dev_mode=dev_mode,
+                )
+                retrieved_context = [
+                    {"chunk_id": parent.parent_id, "context": parent.text, "similarity": parent.score}
+                    for parent in harag_package.parents
+                ]
+                context_chunks = harag_package.context_blocks()
+                citations = harag_package.citations
+            else:
+                retrieved_context = rag_engine.retrieve_bundle(user_query, course_id=course_id)
+                context_chunks = [row.get("context", "") for row in retrieved_context]
+                citations = [row.get("citation", {}) for row in retrieved_context if row.get("citation")]
             rag_gated = False
         else:
+            harag_package = None
             retrieved_context = []
             context_chunks = []
             citations = []
@@ -245,13 +396,30 @@ async def run_ai_pipeline(
         )
 
     # 7) build prompt
-    final_prompt = PromptEngine.build_prompt(
-        query=user_query,
-        bloom_level=bloom_level,
-        competency=competency,
-        context=context_chunks,
-        memory=memory_block,
-    )
+    with StageTimer() as prompt_timer:
+        if harag_package is not None:
+            final_prompt, prompt_trace = PromptEngine.build_harag_prompt(
+                query=user_query,
+                bloom_level=bloom_level,
+                competency=competency,
+                harag_package=harag_package,
+                memory=memory_block,
+            )
+            if dev_mode:
+                harag_package.trace["final_prompt_trace"] = prompt_trace
+        else:
+            prompt_trace = {
+                "mode": "standard",
+                "context_chunk_count": len(context_chunks),
+                "has_memory": bool(memory_block),
+            }
+            final_prompt = PromptEngine.build_prompt(
+                query=user_query,
+                bloom_level=bloom_level,
+                competency=competency,
+                context=context_chunks,
+                memory=memory_block,
+            )
     
     # Log prompt construction
     if pipeline_logger:
@@ -268,6 +436,11 @@ async def run_ai_pipeline(
     # 8) generate (non-streaming)
     with StageTimer() as llm_timer:
         response_text = await run_in_threadpool(llm_client.generate, final_prompt)
+    if harag_package is not None:
+        grounding = EvidenceGroundingChecker().check(response_text, harag_package)
+        harag_package.grounding = grounding
+    else:
+        grounding = {}
     
     # Log LLM generation
     if pipeline_logger:
@@ -286,6 +459,13 @@ async def run_ai_pipeline(
         role=MessageRole.assistant,
         content=response_text,
     )
+    if harag_package is not None:
+        HARAGStorageService(db).record_grounding_check(
+            retrieval_run_id=harag_package.retrieval_run_id,
+            message_id=int(assistant_message.id) if getattr(assistant_message, "id", None) is not None else None,
+            answer_text=response_text,
+            diagnostics=grounding,
+        )
 
     # 10) summarize memory (optional)
     if memory_manager is not None:
@@ -308,7 +488,7 @@ async def run_ai_pipeline(
             total_latency_ms=total_latency_ms,
         )
 
-    return QueryResponse(
+    response_payload = QueryResponse(
         query=user_query,
         bloom_level=bloom_level,
         prompt=final_prompt,
@@ -316,7 +496,68 @@ async def run_ai_pipeline(
         course_id=course_id,
         citations=citations,
         message_id=int(assistant_message.id) if getattr(assistant_message, "id", None) is not None else None,
+        retrieval_mode=resolved_retrieval_mode,
     )
+    if dev_mode:
+        timing = {
+            "confidence_layer_ms": icl_timer.latency_ms,
+            "bloom_detection_ms": bloom_timer.latency_ms,
+            "cbc_mapping_ms": cbc_timer.latency_ms,
+            "retrieval_ms": rag_timer.latency_ms,
+            "prompt_assembly_ms": prompt_timer.latency_ms,
+            "llm_generation_ms": llm_timer.latency_ms,
+            "total_request_ms": total_latency_ms,
+            "total_backend_pipeline_ms": total_latency_ms,
+        }
+        response_payload.dev_trace = {
+            "query_metadata": {
+                "user_query": user_query,
+                "retrieval_mode": resolved_retrieval_mode,
+                "dev_mode": dev_mode,
+                "session_id": str(session_id),
+                "course_id": course_id,
+                "trace_id": trace_id,
+            },
+            "confidence_scores": confidence_scores,
+            "confidence_layer": {
+                "bloom_confidence": confidence_scores.get("bloom_conf"),
+                "cbc_confidence": confidence_scores.get("cbc_conf"),
+                "rag_confidence": confidence_scores.get("rag_conf"),
+                "trigger_decisions": {
+                    "bloom_gated": bloom_gated,
+                    "cbc_gated": cbc_gated,
+                    "rag_gated": rag_gated,
+                },
+            },
+            "bloom": {"level": bloom_level, "confidence": confidence_scores.get("bloom_conf"), "gated": bloom_gated},
+            "cbc": {"competencies": competency, "gated": cbc_gated, "confidence": confidence_scores.get("cbc_conf")},
+            "rag": harag_package.to_dev_trace()
+            if harag_package is not None
+            else _empty_harag_dev_trace(
+                course_id=course_id,
+                course_offering_id=course_offering_id,
+                rag_gated=rag_gated,
+            )
+            if resolved_retrieval_mode == "harag"
+            else _standard_rag_dev_trace(
+                retrieved_context=retrieved_context,
+                course_id=course_id,
+                rag_gated=rag_gated,
+            ),
+            "prompt_trace": {
+                **prompt_trace,
+                "preview": final_prompt[:2000],
+                "context_summary": f"{len(context_chunks)} context chunk(s) appended",
+            },
+            "timing": timing,
+            "grounding": grounding,
+            "evidence": {
+                "evidence_count": len(citations),
+                "selected_citations": citations,
+            },
+            "warnings": [],
+        }
+    return response_payload
 
 
 @router.post("/ai-query", response_model=QueryResponse)
@@ -334,6 +575,7 @@ async def ai_query(
             db=db,
             user_id=user_id,
             session_id=request.session_id,
+            retrieval_mode=request.retrieval_mode,
         )
     except HTTPException:
         raise
@@ -357,6 +599,7 @@ async def ai_query_browser(
             db=db,
             user_id=user_id,
             session_id=session_id,
+            retrieval_mode=None,
         )
     except HTTPException:
         raise
@@ -372,6 +615,7 @@ async def run_ai_pipeline_streaming(
     user_id: str,
     session_id: Optional[UUID],
     course_id: Optional[str] = None,
+    retrieval_mode: Optional[str] = None,
 ) -> AsyncGenerator[dict, None]:
     """Run AI pipeline with streaming LLM generation.
     
@@ -389,10 +633,17 @@ async def run_ai_pipeline_streaming(
     bloom_detector = req.app.state.bloom_detector
     competency_mapper = req.app.state.competency_mapper
     rag_engine = req.app.state.rag_engine
+    harag_retriever = getattr(req.app.state, "harag_retriever", None)
     llm_client = req.app.state.llm_client
     llm_subclient = req.app.state.llm_subclient
     memory_manager = getattr(req.app.state, "memory_manager", None)
     pipeline_logger = getattr(req.app.state, "pipeline_logger", None)
+    dev_mode = _dev_mode_enabled(req)
+    resolved_retrieval_mode = _resolve_retrieval_mode(
+        req,
+        retrieval_mode,
+        harag_available=harag_retriever is not None,
+    )
 
     trace_id = pipeline_logger.generate_trace_id() if pipeline_logger else None
     pipeline_start = time.perf_counter()
@@ -462,6 +713,7 @@ async def run_ai_pipeline_streaming(
                 course_id=resolved_course_id,
                 trace_id=trace_id,
             )
+        course_offering_id = _resolve_active_course_offering_id(db, user_id=user_id, course_code=resolved_course_id)
 
         # 2) Store user message
         try:
@@ -522,7 +774,12 @@ async def run_ai_pipeline_streaming(
         # 6) Competency mapping (gated)
         with StageTimer() as cbc_timer:
             if confidence_scores["cbc_conf"] > CBC_THRESHOLD:
-                competency = competency_mapper.map(user_query)
+                competency = competency_mapper.map(
+                    user_query,
+                    db=db,
+                    course_offering_id=course_offering_id,
+                    course_code=resolved_course_id,
+                )
                 cbc_gated = False
             else:
                 competency = None
@@ -540,11 +797,30 @@ async def run_ai_pipeline_streaming(
         # 7) RAG retrieve (gated, course-scoped)
         with StageTimer() as rag_timer:
             if confidence_scores["rag_conf"] > RAG_THRESHOLD:
-                retrieved_context = rag_engine.retrieve_bundle(user_query, course_id=resolved_course_id)
-                context_chunks = [row.get("context", "") for row in retrieved_context]
-                citations = [row.get("citation", {}) for row in retrieved_context if row.get("citation")]
+                harag_package = None
+                if resolved_retrieval_mode == "harag" and harag_retriever is not None:
+                    harag_package = harag_retriever.retrieve(
+                        db,
+                        query=user_query,
+                        course_code=resolved_course_id,
+                        course_offering_id=course_offering_id,
+                        user_id=user_id,
+                        session_id=str(session_id),
+                        dev_mode=dev_mode,
+                    )
+                    retrieved_context = [
+                        {"chunk_id": parent.parent_id, "context": parent.text, "similarity": parent.score}
+                        for parent in harag_package.parents
+                    ]
+                    context_chunks = harag_package.context_blocks()
+                    citations = harag_package.citations
+                else:
+                    retrieved_context = rag_engine.retrieve_bundle(user_query, course_id=resolved_course_id)
+                    context_chunks = [row.get("context", "") for row in retrieved_context]
+                    citations = [row.get("citation", {}) for row in retrieved_context if row.get("citation")]
                 rag_gated = False
             else:
+                harag_package = None
                 retrieved_context = []
                 context_chunks = []
                 citations = []
@@ -561,13 +837,30 @@ async def run_ai_pipeline_streaming(
             )
 
         # 8) Build prompt
-        final_prompt = PromptEngine.build_prompt(
-            query=user_query,
-            bloom_level=bloom_level,
-            competency=competency,
-            context=context_chunks,
-            memory=memory_block,
-        )
+        with StageTimer() as prompt_timer:
+            if harag_package is not None:
+                final_prompt, prompt_trace = PromptEngine.build_harag_prompt(
+                    query=user_query,
+                    bloom_level=bloom_level,
+                    competency=competency,
+                    harag_package=harag_package,
+                    memory=memory_block,
+                )
+                if dev_mode:
+                    harag_package.trace["final_prompt_trace"] = prompt_trace
+            else:
+                prompt_trace = {
+                    "mode": "standard",
+                    "context_chunk_count": len(context_chunks),
+                    "has_memory": bool(memory_block),
+                }
+                final_prompt = PromptEngine.build_prompt(
+                    query=user_query,
+                    bloom_level=bloom_level,
+                    competency=competency,
+                    context=context_chunks,
+                    memory=memory_block,
+                )
         
         if pipeline_logger:
             pipeline_logger.log_prompt_construction(
@@ -608,6 +901,11 @@ async def run_ai_pipeline_streaming(
                     }
         
         response_text = partial_text
+        if harag_package is not None:
+            grounding = EvidenceGroundingChecker().check(response_text, harag_package)
+            harag_package.grounding = grounding
+        else:
+            grounding = {}
         llm_elapsed = time.perf_counter() - llm_start
         
         if pipeline_logger:
@@ -626,6 +924,13 @@ async def run_ai_pipeline_streaming(
             role=MessageRole.assistant,
             content=response_text,
         )
+        if harag_package is not None:
+            HARAGStorageService(db).record_grounding_check(
+                retrieval_run_id=harag_package.retrieval_run_id,
+                message_id=int(assistant_message.id) if getattr(assistant_message, "id", None) is not None else None,
+                answer_text=response_text,
+                diagnostics=grounding,
+            )
 
         # 11) Summarize memory
         if memory_manager is not None:
@@ -647,12 +952,74 @@ async def run_ai_pipeline_streaming(
             )
 
         # Emit final done event
-        yield {
+        done_event = {
             "full_response": response_text,
             "session_id": str(session_id),
             "citations": citations,
             "confidence_score": confidence_scores.get("rag_conf", 0.0),
+            "retrieval_mode": resolved_retrieval_mode,
         }
+        if dev_mode:
+            total_latency_ms = total_latency * 1000
+            timing = {
+                "confidence_layer_ms": icl_timer.latency_ms,
+                "bloom_detection_ms": bloom_timer.latency_ms,
+                "cbc_mapping_ms": cbc_timer.latency_ms,
+                "retrieval_ms": rag_timer.latency_ms,
+                "prompt_assembly_ms": prompt_timer.latency_ms,
+                "llm_generation_ms": llm_elapsed * 1000,
+                "total_request_ms": total_latency_ms,
+                "total_backend_pipeline_ms": total_latency_ms,
+            }
+            done_event["dev_trace"] = {
+                "query_metadata": {
+                    "user_query": user_query,
+                    "retrieval_mode": resolved_retrieval_mode,
+                    "dev_mode": dev_mode,
+                    "session_id": str(session_id),
+                    "course_id": resolved_course_id,
+                    "trace_id": trace_id,
+                },
+                "confidence_scores": confidence_scores,
+                "confidence_layer": {
+                    "bloom_confidence": confidence_scores.get("bloom_conf"),
+                    "cbc_confidence": confidence_scores.get("cbc_conf"),
+                    "rag_confidence": confidence_scores.get("rag_conf"),
+                    "trigger_decisions": {
+                        "bloom_gated": bloom_gated,
+                        "cbc_gated": cbc_gated,
+                        "rag_gated": rag_gated,
+                    },
+                },
+                "bloom": {"level": bloom_level, "confidence": confidence_scores.get("bloom_conf"), "gated": bloom_gated},
+                "cbc": {"competencies": competency, "gated": cbc_gated, "confidence": confidence_scores.get("cbc_conf")},
+                "rag": harag_package.to_dev_trace()
+                if harag_package is not None
+                else _empty_harag_dev_trace(
+                    course_id=resolved_course_id,
+                    course_offering_id=course_offering_id,
+                    rag_gated=rag_gated,
+                )
+                if resolved_retrieval_mode == "harag"
+                else _standard_rag_dev_trace(
+                    retrieved_context=retrieved_context,
+                    course_id=resolved_course_id,
+                    rag_gated=rag_gated,
+                ),
+                "prompt_trace": {
+                    **prompt_trace,
+                    "preview": final_prompt[:2000],
+                    "context_summary": f"{len(context_chunks)} context chunk(s) appended",
+                },
+                "timing": timing,
+                "grounding": grounding,
+                "evidence": {
+                    "evidence_count": len(citations),
+                    "selected_citations": citations,
+                },
+                "warnings": [],
+            }
+        yield done_event
 
     except Exception as e:
         if pipeline_logger:
@@ -699,6 +1066,7 @@ async def ai_query_stream_endpoint(
             user_id=user_id,
             session_id=session_uuid,
             course_id=request.course_id,
+            retrieval_mode=request.retrieval_mode,
         ):
             # Format as SSE
             yield {"data": json.dumps(event_data)}

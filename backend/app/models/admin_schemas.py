@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 UserRoleType = Literal[
@@ -153,11 +153,14 @@ class DepartmentUpdateRequest(BaseModel):
 
 
 class RAGMonitoringOverviewOut(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     ingestion: dict[str, Any]
     vector_store: dict[str, Any]
     query_performance: dict[str, Any]
     infrastructure: dict[str, Any]
     rag_config: dict[str, Any]
+    model_config_data: dict[str, Any] = Field(default_factory=dict, alias="model_config")
 
 
 class RAGControlRequest(BaseModel):

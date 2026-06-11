@@ -18,8 +18,11 @@ from app.db.models import (
     CourseOffering,
     Department,
     Faculty,
+    ChildChunk,
+    DocumentSharingRequest,
     IngestedDocument,
     InstitutionSettings,
+    RetrievalRun,
     User,
     UserProfile,
     UserRole,
@@ -43,6 +46,7 @@ from app.models.admin_schemas import (
 )
 from app.models.course_schemas import CourseCreate, CourseOut, CourseUpdate
 from app.services.auth.deps import require_current_user_roles
+from app.services.harag.storage_service import HARAGStorageService
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -516,12 +520,15 @@ def admin_rag_overview(
 
     total_chunks = int(db.query(func.coalesce(func.sum(IngestedDocument.total_chunks), 0)).scalar() or 0)
     total_vectors = int(db.query(func.coalesce(func.sum(IngestedDocument.stored_vectors), 0)).scalar() or 0)
+    harag_child_chunks = int(db.query(func.count(ChildChunk.id)).scalar() or 0)
+    retrieval_runs = int(db.query(func.count(RetrievalRun.id)).scalar() or 0)
     failed_docs = int(status_breakdown.get("failed", 0))
 
     vector_store_info: dict[str, Any] = {
-        "available": False,
-        "collection_count": 0,
-        "collections": [],
+        "available": True,
+        "backend": "postgresql_pgvector",
+        "child_chunk_vectors": harag_child_chunks,
+        "legacy_chroma": {"available": False, "collection_count": 0, "collections": []},
     }
     storage_bytes = 0
     try:
@@ -536,7 +543,7 @@ def admin_rag_overview(
             except Exception:
                 count = 0
             collections.append({"name": col.name, "items": count})
-        vector_store_info = {
+        vector_store_info["legacy_chroma"] = {
             "available": True,
             "collection_count": len(collections),
             "collections": collections[:200],
@@ -565,18 +572,28 @@ def admin_rag_overview(
     except Exception:
         pass
 
+    rag_config = {
+        "active_query_model": str(settings.query_llm_model_path),
+        "active_final_model": str(settings.final_llm_model_path),
+        "configured_rag_model_name": settings_row.rag_model_name,
+        "configured_embedding_strategy": settings_row.rag_embedding_strategy,
+        "last_rebuild_at": settings_row.rag_last_rebuild_at,
+        "rebuild_requested_at": settings_row.rag_rebuild_requested_at,
+    }
+
     return {
         "ingestion": {
             "total_documents": total_docs,
             "status_breakdown": status_breakdown,
             "total_chunks": total_chunks,
             "total_vectors": total_vectors,
+            "harag_child_chunks": harag_child_chunks,
             "failed_documents": failed_docs,
         },
         "vector_store": vector_store_info,
         "query_performance": {
-            "available": False,
-            "note": "Query latency metrics are not yet instrumented in this branch",
+            "available": True,
+            "retrieval_runs": retrieval_runs,
         },
         "infrastructure": {
             "cpu_load_1m": cpu_load,
@@ -585,14 +602,8 @@ def admin_rag_overview(
             "vector_storage_bytes": storage_bytes,
             "vector_storage_path": str(chroma_path),
         },
-        "rag_config": {
-            "active_query_model": str(settings.query_llm_model_path),
-            "active_final_model": str(settings.final_llm_model_path),
-            "configured_rag_model_name": settings_row.rag_model_name,
-            "configured_embedding_strategy": settings_row.rag_embedding_strategy,
-            "last_rebuild_at": settings_row.rag_last_rebuild_at,
-            "rebuild_requested_at": settings_row.rag_rebuild_requested_at,
-        },
+        "rag_config": rag_config,
+        "model_config": rag_config,
     }
 
 
@@ -612,3 +623,81 @@ def admin_rag_control(
 
     db.commit()
     return {"ok": True, "message": "RAG configuration updated"}
+
+
+@router.get("/rag/sharing-requests")
+def admin_list_document_sharing_requests(
+    status: str | None = Query(default="pending"),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_current_user_roles("admin")),
+):
+    query = db.query(DocumentSharingRequest).join(IngestedDocument, IngestedDocument.document_id == DocumentSharingRequest.document_id)
+    if status:
+        query = query.filter(DocumentSharingRequest.status == status)
+    rows = query.order_by(DocumentSharingRequest.requested_at.desc()).limit(200).all()
+    return [
+        {
+            "id": str(row.id),
+            "document_id": str(row.document_id),
+            "course_code": row.course_code,
+            "course_offering_id": str(row.course_offering_id) if row.course_offering_id else None,
+            "requested_by_user_id": str(row.requested_by_user_id) if row.requested_by_user_id else None,
+            "reviewed_by_user_id": str(row.reviewed_by_user_id) if row.reviewed_by_user_id else None,
+            "status": row.status,
+            "rationale": row.rationale,
+            "review_note": row.review_note,
+            "requested_at": row.requested_at,
+            "reviewed_at": row.reviewed_at,
+            "document": {
+                "filename": row.document.original_filename if row.document else None,
+                "source_scope": row.document.source_scope if row.document else None,
+            },
+        }
+        for row in rows
+    ]
+
+
+@router.post("/rag/sharing-requests/{request_id}/approve", response_model=ActionOut)
+def admin_approve_document_sharing_request(
+    request_id: UUID,
+    review_note: str | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_current_user_roles("admin")),
+):
+    row = db.query(DocumentSharingRequest).filter(DocumentSharingRequest.id == request_id).one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Sharing request not found")
+    doc = db.query(IngestedDocument).filter(IngestedDocument.document_id == row.document_id).one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    row.status = "approved"
+    row.reviewed_by_user_id = admin.id
+    row.reviewed_at = datetime.now(timezone.utc)
+    row.review_note = review_note
+    doc.source_scope = "course_shared_approved"
+    db.commit()
+    HARAGStorageService(db).update_document_scope(document_id=str(doc.document_id), source_scope="course_shared_approved")
+    return {"ok": True, "message": "Document sharing approved"}
+
+
+@router.post("/rag/sharing-requests/{request_id}/reject", response_model=ActionOut)
+def admin_reject_document_sharing_request(
+    request_id: UUID,
+    review_note: str | None = None,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_current_user_roles("admin")),
+):
+    row = db.query(DocumentSharingRequest).filter(DocumentSharingRequest.id == request_id).one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Sharing request not found")
+    doc = db.query(IngestedDocument).filter(IngestedDocument.document_id == row.document_id).one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    row.status = "rejected"
+    row.reviewed_by_user_id = admin.id
+    row.reviewed_at = datetime.now(timezone.utc)
+    row.review_note = review_note
+    doc.source_scope = "course_shared_rejected"
+    db.commit()
+    HARAGStorageService(db).update_document_scope(document_id=str(doc.document_id), source_scope="course_shared_rejected")
+    return {"ok": True, "message": "Document sharing rejected"}

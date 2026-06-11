@@ -254,6 +254,22 @@ export interface RagOverview {
   model_config: Record<string, unknown>;
 }
 
+export interface DocumentSharingRequest {
+  id: string;
+  document_id: string;
+  course_code: string;
+  course_offering_id?: string | null;
+  status: 'pending' | 'approved' | 'rejected';
+  rationale?: string | null;
+  review_note?: string | null;
+  requested_at: string;
+  reviewed_at?: string | null;
+  document?: {
+    filename?: string | null;
+    source_scope?: string | null;
+  };
+}
+
 export const adminApi = {
   getUsers: async (
     token: string,
@@ -562,6 +578,41 @@ export const adminApi = {
     return response.json();
   },
 
+  getDocumentSharingRequests: async (token: string, status = 'pending'): Promise<DocumentSharingRequest[]> => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/rag/sharing-requests?status=${encodeURIComponent(status)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to fetch sharing requests');
+    }
+    return response.json();
+  },
+
+  approveDocumentSharingRequest: async (token: string, requestId: string) => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/rag/sharing-requests/${requestId}/approve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to approve sharing request');
+    }
+    return response.json();
+  },
+
+  rejectDocumentSharingRequest: async (token: string, requestId: string) => {
+    const response = await fetch(`${API_BASE_URL}/api/admin/rag/sharing-requests/${requestId}/reject`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || 'Failed to reject sharing request');
+    }
+    return response.json();
+  },
+
   getAnalytics: async (token: string) => {
     const [users, courses, rag] = await Promise.all([
       adminApi.getUsers(token, { limit: 500 }),
@@ -595,12 +646,14 @@ export const chatApi = {
       token: string,
       content: string,
       courseCode?: string | null,
-      limit: number = 200
+      limit: number = 200,
+      options?: { devMode?: boolean; retrievalMode?: 'standard' | 'harag' }
     ) => {
       const payload = {
         content,
         course_code: courseCode && courseCode.trim().length > 0 ? courseCode.trim() : null,
         limit,
+        retrieval_mode: options?.retrievalMode || 'harag',
       };
 
       const response = await fetch(`${API_BASE_URL}/chats/query`, {
@@ -608,6 +661,8 @@ export const chatApi = {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          ...(options?.devMode ? { "X-EduSmart-Dev-Mode": "true" } : {}),
+          "X-EduSmart-Retrieval-Mode": options?.retrievalMode || 'harag',
         },
         body: JSON.stringify(payload),
       });
@@ -648,13 +703,21 @@ export const chatApi = {
     return response.json();
   },
 
-  sendMessage: async (token: string, sessionId: string, content: string) => {
+  sendMessage: async (
+    token: string,
+    sessionId: string,
+    content: string,
+    options?: { devMode?: boolean; retrievalMode?: 'standard' | 'harag' }
+  ) => {
     const params = new URLSearchParams({ content });
+    if (options?.retrievalMode) params.append('retrieval_mode', options.retrievalMode);
     const response = await fetch(`${API_BASE_URL}/chats/${sessionId}/messages`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         Authorization: `Bearer ${token}`,
+        ...(options?.devMode ? { 'X-EduSmart-Dev-Mode': 'true' } : {}),
+        'X-EduSmart-Retrieval-Mode': options?.retrievalMode || 'harag',
       },
       body: params,
     });
@@ -684,7 +747,12 @@ export const chatApi = {
 
 // ==================== Ingestion Endpoints ====================
 export const ingestionApi = {
-  uploadDocument: async (token: string, file: File, courseId?: string) => {
+  uploadDocument: async (
+    token: string,
+    file: File,
+    courseId?: string,
+    options?: { courseOfferingId?: string | null; ingestionMode?: 'standard' | 'harag' }
+  ) => {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -693,6 +761,8 @@ export const ingestionApi = {
 
     const query = new URLSearchParams();
     if (courseId) query.append('course_id', courseId);
+    if (options?.courseOfferingId) query.append('course_offering_id', options.courseOfferingId);
+    query.append('ingestion_mode', options?.ingestionMode || 'standard');
 
     const response = await fetch(`${API_BASE_URL}/ingest/upload?${query}`, {
       method: 'POST',

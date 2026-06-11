@@ -74,7 +74,11 @@ class RAGEngine:
             snippet = doc.strip()
             out.append(
                 {
+                    "chunk_id": ids[idx] if idx < len(ids) else None,
                     "context": f"{prefix}\n{snippet}",
+                    "text": snippet,
+                    "source": src,
+                    "content_type": ctype,
                     "citation": {
                         "id": md.get("document_id") or (ids[idx] if idx < len(ids) else None),
                         "title": heading or src,

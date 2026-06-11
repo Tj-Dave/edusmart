@@ -8,6 +8,7 @@ class ChatQueryIn(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
     course_code: Optional[str] = None
     limit: int = Field(default=200, ge=1, le=2000)  # for memory/context usage if needed
+    retrieval_mode: Optional[str] = None
 
 class ChatQueryOut(BaseModel):
     session: ChatSessionOut
@@ -15,6 +16,7 @@ class ChatQueryOut(BaseModel):
     response: str
     citations: List[Dict[str, Any]] = []
     message_id: Optional[int] = None  # assistant message id
+    dev_trace: Optional[Dict[str, Any]] = None
 
 class ChatSessionCreate(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)

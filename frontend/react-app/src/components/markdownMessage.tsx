@@ -12,7 +12,7 @@ export default function MarkdownMessage({ content, className }: Props) {
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeSanitize]}
         components={{
-          p: ({ children }) => <p className="text-sm leading-relaxed my-2">{children}</p>,
+          p: ({ children }) => <div className="text-sm leading-relaxed my-2">{children}</div>,
           strong: ({ children }) => <strong className="font-bold">{children}</strong>,
           em: ({ children }) => <em className="font-semibold">{children}</em>,
           ul: ({ children }) => <ul className="list-disc pl-5 my-2 space-y-1">{children}</ul>,
