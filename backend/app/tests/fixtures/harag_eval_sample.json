@@ -1,0 +1,11 @@
+{
+  "name": "sample_harag_eval",
+  "examples": [
+    {
+      "query": "Explain the core concept from the uploaded lecturer note.",
+      "course_code": "SWE3202",
+      "expected_parent_ids": [],
+      "expected_child_ids": []
+    }
+  ]
+}

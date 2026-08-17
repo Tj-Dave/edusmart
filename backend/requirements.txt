@@ -5,7 +5,7 @@ anyio==4.12.1
 attrs==25.4.0
 backoff==2.2.1
 bcrypt==5.0.0
-Bottleneck @ file:///home/task_176193795831906/conda-bld/bottleneck_1761938007449/work
+Bottleneck
 build==1.4.0
 certifi==2026.1.4
 charset-normalizer==3.4.4
@@ -54,13 +54,13 @@ markdown-it-py==4.0.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
 mkl-service==2.5.2
-mkl_fft @ file:///home/task_176159258761192/conda-bld/mkl_fft_1761592901799/work
-mkl_random @ file:///home/task_176159293348456/conda-bld/mkl_random_1761592947335/work
+mkl_fft
+mkl_random
 mmh3==5.2.0
 mpmath==1.3.0
 networkx==3.6.1
-numexpr @ file:///home/task_176216559693183/conda-bld/numexpr_1762165608108/work
-numpy @ file:///home/task_176837628610750/croot/numpy_and_numpy_base_1768376363744/work/dist/numpy-2.4.1-cp311-cp311-linux_x86_64.whl#sha256=227e6c60dd7c289a9109337741bd36e5651e79705cb6e837eba788388e87f47b
+numexpr
+numpy
 nvidia-cublas-cu12==12.8.4.1
 nvidia-cuda-cupti-cu12==12.8.90
 nvidia-cuda-nvrtc-cu12==12.8.93
@@ -88,7 +88,7 @@ orjson==3.11.5
 ormsgpack==1.12.2
 overrides==7.7.0
 packaging==25.0
-pandas @ file:///home/task_176233228033452/conda-bld/pandas_1762332325070/work/dist/pandas-2.3.3-cp311-cp311-linux_x86_64.whl#sha256=920644f9267829793147d85d419f7e25d0fb8c679dd7fa07f7532a94488a1690
+pandas
 passlib==1.7.4
 posthog==5.4.0
 protobuf==6.33.4
@@ -100,9 +100,9 @@ pydantic_core==2.41.5
 Pygments==2.19.2
 PyPika==0.50.0
 pyproject_hooks==1.2.0
-python-dateutil @ file:///croot/python-dateutil_1716495738603/work
+python-dateutil
 python-dotenv==1.2.1
-pytz @ file:///croot/pytz_1752135852232/work
+pytz
 PyYAML==6.0.3
 # Document parsing libraries for ingestion
 PyMuPDF==1.25.2
@@ -120,7 +120,7 @@ scikit-learn==1.8.0
 scipy==1.17.0
 sentence-transformers==5.2.2
 shellingham==1.5.4
-six @ file:///croot/six_1744271502820/work
+six
 SQLAlchemy==2.0.46
 sse-starlette>=1.6.5
 starlette==0.50.0
@@ -135,7 +135,7 @@ triton==3.6.0
 typer==0.21.1
 typing-inspection==0.4.2
 typing_extensions==4.15.0
-tzdata @ file:///home/task_176829656558347/croot/python-tzdata_1768296637279/work
+tzdata
 urllib3==2.6.3
 # Testing
 pytest==7.4.4

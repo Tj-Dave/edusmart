@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     FINAL_LLM_MODEL_FAMILY: str = "gemma"
 
     FINAL_LLM_MODEL_CPU_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
-    FINAL_LLM_MODEL_DESKTOP_PATH: Path = BASE_DIR / "models" / "gemma-3-4b-pt-q4_0.gguf"
+    FINAL_LLM_MODEL_DESKTOP_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
     FINAL_LLM_MODEL_GPU_PATH: Path = BASE_DIR / "models" / "gemma-3n-q4_k_m.gguf"
 
     FINAL_LLM_CONTEXT_SIZE: int = 4096
